@@ -1,12 +1,15 @@
 (* Runtime.ml - Runtime support for translated Elisp code using Core *)
 
 open! Core
-(* REMOVED open! Scaml *)
 
-(* Use types from other library modules directly *)
+(* Use types/modules from the Scaml library *)
 module Value = Value
-module Analyze = Analyze
-module InferredType = InferredType
+(* module Analyze = Analyze - REMOVED *)
+(* module Translate = Translate - REMOVED *)
+(* module Compiler = Compiler - REMOVED *)
+module InferredType = InferredType (* Keep if needed elsewhere, maybe not? Check usage... Value.t compare uses it implicitly. OK. *)
+(* module Interpreter = Interpreter - REMOVED *)
+
 
 (* --- Error Handling Helpers --- *)
 let value_type_to_string v = Value.to_string v
@@ -19,8 +22,8 @@ let runtime_error func_name message =
   failwithf "Runtime Error in %s: %s" func_name message ()
 
 (* --- Global Environment --- *)
-let global_env : Value.t Hashtbl.M(String).t =
-  Hashtbl.create (module String) ~size:64
+let global_env : Value.t String.Table.t =
+  String.Table.create ~size:64 ()
 let register_global name (value: Value.t) =
   Hashtbl.set global_env ~key:name ~data:value
 let set_global_variable name (value: Value.t) =
@@ -167,9 +170,7 @@ let builtin_equal args =
   let b = List.nth_exn args 1 in
   if [%compare.equal: Value.t] a b then Value.T else Value.Nil (* Use derived Core equality *)
 
-
 (* --- Value <-> Sexp Conversion Helpers (Simplified) --- *)
-(* These are needed for the 'compile' builtin if it handles Sexp directly *)
 let rec sexp_to_value (s : Sexp.t) : Value.t =
   match s with
   | Sexp.Atom "nil" -> Value.Nil
@@ -209,7 +210,7 @@ and list_sexp v = match v with (* Helper for proper lists *)
 let value_list_to_sexp_list (code_value : Value.t) : Sexp.t list =
   match Value.value_to_list_opt code_value with
   | Some values -> List.map values ~f:value_to_sexp
-  | None -> runtime_error "compile" "Argument must be a proper list of S-expressions"
+  | None -> runtime_error "(value->sexp)" "Argument must be a proper list of S-expressions"
 
 
 let alist_to_value (alist : (string * Value.t) list) : Value.t =
@@ -219,40 +220,95 @@ let alist_to_value (alist : (string * Value.t) list) : Value.t =
   in
   list_to_value value_pairs
 
+(* --- Compile Builtin Implementation --- *)
 
-(** Compile Builtin: Simplified to break dependency cycle *)
+(* Type signature for the function that implements the compilation pipeline *)
+type compile_impl_t = Sexp.t list -> (string * Value.t) list
+
+(* Reference to hold the registered implementation *)
+let compile_impl_ref : compile_impl_t option ref = ref None
+
+(* Function to register the implementation (called from main application) *)
+let register_compile_impl (f : compile_impl_t) : unit =
+  compile_impl_ref := Some f
+
+(* The 'compile' built-in function *)
 let builtin_compile args =
   match args with
   | [ code_value ] ->
       begin
-        try
-          (* 1. Convert Value.t list back to Sexp.t list *)
-          let sexps = value_list_to_sexp_list code_value in
-
-          (* 2. Analyze *)
-          let _typed_asts, _final_env_types = Analyze.analyze_toplevel sexps in
-
-          (* 3. Translate - REMOVED to break cycle *)
-          (* let ocaml_code = Translate.translate_toplevel typed_asts final_env_types in *)
-
-          (* 4. Add registration code - REMOVED *)
-
-          (* 5. Compile and Load - REMOVED *)
-          (* let _, get_env_func = Compiler.compile_and_load_string final_ocaml_code in *)
-
-          (* 6. Get environment and convert to Value.t - REMOVED *)
-          (* let exposed_env = get_env_func () in *)
-          (* alist_to_value exposed_env *)
-
-          (* Simplification: Return Nil for now *)
-          Value.Nil
-
-        with
-        | Failure msg -> runtime_error "compile" (sprintf "Failed during analysis: %s" msg)
-        (* Compiler.Compilation_error removed *)
-        | exn -> runtime_error "compile" (sprintf "Unexpected error during analysis: %s" (Exn.to_string exn))
+        match !compile_impl_ref with
+        | None ->
+            runtime_error "compile" "Compilation implementation not registered"
+        | Some compile_fn ->
+            try
+              let sexps = value_list_to_sexp_list code_value in
+              let exposed_env_alist = compile_fn sexps in
+              alist_to_value exposed_env_alist
+            with
+            (* Catch potential errors from the compilation pipeline *)
+            (* Use specific exception from Compiler if available *)
+            (* | Compiler.Compilation_error msg -> runtime_error "compile" (sprintf "Compilation Error: %s" msg) *)
+            | Failure msg -> runtime_error "compile" (sprintf "Failed during compilation pipeline: %s" msg)
+            | exn -> runtime_error "compile" (sprintf "Unexpected error during compilation: %s" (Exn.to_string exn))
       end
   | _ -> arity_error "compile" (sprintf "expected 1 argument (a quoted list of expressions), got %d" (List.length args))
+
+
+(* --- Interpret Builtin Implementation --- *)
+
+(* Type signature for the function that implements interpretation *)
+type interpret_impl_t = Sexp.t list -> Value.t
+
+(* Reference to hold the registered implementation *)
+let interpret_impl_ref : interpret_impl_t option ref = ref None
+
+(* Function to register the implementation (called from main application) *)
+let register_interpret_impl (f : interpret_impl_t) : unit =
+  interpret_impl_ref := Some f
+
+(* The 'interpret' built-in function *)
+let builtin_interpret args =
+  match args with
+  | [ code_value ] ->
+      begin
+        match !interpret_impl_ref with
+        | None ->
+            runtime_error "interpret" "Interpretation implementation not registered"
+        | Some interpret_fn ->
+            try
+              let sexps = value_list_to_sexp_list code_value in
+              (* Call the registered interpretation function *)
+              interpret_fn sexps
+              (* Return the result of the last expression *)
+            with
+            | Failure msg -> runtime_error "interpret" (sprintf "Failed during interpretation: %s" msg)
+            | exn -> runtime_error "interpret" (sprintf "Unexpected error during interpretation: %s" (Exn.to_string exn))
+      end
+  | _ -> arity_error "interpret" (sprintf "expected 1 argument (a quoted list of expressions), got %d" (List.length args))
+
+(* --- Assoc Builtin Implementation --- *)
+
+let builtin_assoc args =
+  match args with
+  | [ key; alist_val ] ->
+      let rec find_in_alist lst =
+        match lst with
+        | Value.Nil -> Value.Nil (* Not found *)
+        | Value.Cons { car = pair_ref; cdr = rest_ref } ->
+            (match !pair_ref with
+             | Value.Cons { car = item_key_ref; cdr = _ } ->
+                 (* Use 'equal' for comparison, as keys can be any type *)
+                 if [%compare.equal: Value.t] key !item_key_ref then
+                   !pair_ref (* Found the pair *)
+                 else
+                   find_in_alist !rest_ref (* Check rest of the list *)
+             | _ -> find_in_alist !rest_ref (* Skip malformed pair *)
+            )
+        | _ -> runtime_error "assoc" "Second argument must be a proper association list"
+      in
+      find_in_alist alist_val
+  | _ -> arity_error "assoc" (sprintf "expected 2 arguments (key alist), got %d" (List.length args))
 
 
 (* --- Register Built-ins --- *)
@@ -261,6 +317,7 @@ let () =
   (* List Functions *)
   register "cons" builtin_cons; register "car" builtin_car; register "cdr" builtin_cdr;
   register "setcar" builtin_setcar; register "setcdr" builtin_setcdr;
+  register "assoc" builtin_assoc; (* Added assoc *)
   (* Arithmetic Functions *)
   register "+" builtin_plus; register "-" builtin_minus; register "*" builtin_multiply; register "/" builtin_divide;
   (* Type Predicates *)
@@ -270,8 +327,9 @@ let () =
   register "null" builtin_null; register "listp" builtin_listp;
   (* Equality *)
   register "eq" builtin_eq; register "equal" builtin_equal;
-  (* Compilation *)
-  register "compile" builtin_compile; (* Keep registration, but simplified behavior *)
+  (* Execution Modes *)
+  register "compile" builtin_compile; (* Uses registered implementation *)
+  register "interpret" builtin_interpret; (* Uses registered implementation *)
   (* Constants *)
   register_global "nil" Value.Nil; register_global "t" Value.T;
   ()

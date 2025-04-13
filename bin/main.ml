@@ -1,64 +1,84 @@
-(* bin/main.ml - Main executable for Scaml *)
+(* bin/main.ml - REPL for Scaml *)
 
 open! Core
 open! Scaml (* OK here - this is the executable depending on the library *)
 open! Sexplib.Std
 
-let process_file filename =
-  printf "Processing file: %s\n%!" filename;
+(* --- Compile Implementation (for 'compile' built-in) --- *)
+let scaml_compile_impl (sexps : Sexp.t list) : (string * Value.t) list =
   try
-    (* 1. Read and Parse *)
-    let sexps = Sexp.load_sexps filename in
-
-    (* 2. Analyze *)
-    printf "Analyzing...\n%!";
-    let typed_asts, final_env_types = Analyze.analyze_toplevel sexps in (* Use Scaml.Analyze *)
-    (* printf "TASTs:\n%s\n" (Sexp.to_string_hum ([%sexp_of: Analyze.TypedAst.t list] typed_asts)); *)
-    (* printf "Final Env Types:\n%s\n" (Sexp.to_string_hum ([%sexp_of: (string * InferredType.t) list] final_env_types)); *)
-
-    (* 3. Translate *)
-    printf "Translating...\n%!";
-    let ocaml_code = Translate.translate_toplevel typed_asts final_env_types in (* Use Scaml.Translate *)
-    (* printf "Generated OCaml:\n%s\n" ocaml_code; *)
-
-
-    (* REMOVED manual callback registration string concatenation *)
-    let final_ocaml_code = ocaml_code in
-
-    (* 4. Compile and Load *)
-    printf "Compiling and loading...\n%!";
-    (* Use the Compiler module from the Scaml library *)
-    let run_func, get_env_func = Compiler.compile_and_load_string final_ocaml_code in (* Use Scaml.Compiler *)
-
-    (* 5. Execute *)
-    printf "Executing run function...\n%!";
-    let result = run_func () in
-    printf "Run Result: %s\n%!" (Value.to_string result); (* Use Scaml.Value *)
-
-    (* 6. Get and Print Environment *)
-    printf "Retrieving environment...\n%!";
-    let exposed_env = get_env_func () in
-    printf "Exposed Environment:\n";
-    List.iter exposed_env ~f:(fun (name, value) ->
-      printf "  %s: %s\n" name (Value.to_string value) (* Use Scaml.Value *)
-    );
-    printf "%!"
-
+     (* 1. Analyze *)
+     let typed_asts, final_env_types = Analyze.analyze_toplevel sexps in
+     (* 2. Translate *)
+     let ocaml_code = Translate.translate_toplevel typed_asts final_env_types in
+     (* 3. Compile and Load *)
+     let _, get_env_func = Compiler.compile_and_load_string ocaml_code in
+     (* 4. Get environment *)
+     get_env_func ()
   with
-  | Sexp.Parse_error { err_msg; _ } -> printf "Parse Error: %s\n%!" err_msg
-  | Sys_error msg -> printf "System Error: %s\n%!" msg
-  | Compiler.Compilation_error msg -> printf "Compilation Error: %s\n%!" msg (* Use Scaml.Compiler *)
-  | Failure msg -> printf "Error: %s\n%!" msg (* Catch runtime errors *)
-  | exn -> printf "Unknown Error: %s\n%!" (Exn.to_string exn)
+   (* Propagate errors, potentially wrapping them *)
+   | Compiler.Compilation_error msg -> failwith ("Compilation Error: " ^ msg)
+   | Failure msg -> failwith ("Analysis/Translation/Runtime Error: " ^ msg)
+   | exn -> failwith ("Unexpected compilation pipeline error: " ^ Exn.to_string exn)
+
+(* --- Interpret Implementation (for 'interpret' built-in) --- *)
+let scaml_interpret_impl (sexps : Sexp.t list) : Value.t =
+    try
+        (* Evaluate using the interpreter's top-level function *)
+        Interpreter.eval_toplevel sexps
+    with
+    | Failure msg -> failwith ("Interpretation Error: " ^ msg)
+    | exn -> failwith ("Unexpected interpretation error: " ^ Exn.to_string exn)
+
+
+(* --- REPL Implementation --- *)
+let run_repl () =
+  (* Initialize the REPL's lexical environment (starts empty) *)
+  let repl_env : Interpreter.eval_env ref = ref [] in
+  let continue = ref true in
+
+  (* Register 'exit' as a simple builtin for the REPL *)
+  Runtime.register_global "exit" (Value.Builtin (fun _ -> continue := false; Value.Nil));
+
+  printf "Welcome to Scaml REPL!\n";
+  printf "Use (exit) to quit.\n";
+
+  while !continue do
+    try
+      printf "> %!"; (* Print prompt *)
+      (* Read *)
+      match In_channel.input_line In_channel.stdin with
+      | None -> continue := false (* End of file *)
+      | Some line ->
+          if not (String.is_empty line) then
+            try
+              (* Parse *)
+              let sexp = Sexp.of_string line in
+              (* Evaluate using the Interpreter for the REPL itself *)
+              let result = Interpreter.eval !repl_env sexp in
+              (* Print *)
+              printf "%s\n%!" (Value.to_string result)
+            with
+            (* Handle parsing errors *)
+            | Sexp.Parse_error { err_msg; _ } -> printf "Parse Error: %s\n%!" err_msg
+            | Failure msg when String.is_prefix msg ~prefix:"Sexplib.Conv.of_sexp_error" -> printf "Parse Error: %s\n%!" msg
+            (* Handle runtime errors during evaluation (from Interpreter or builtins) *)
+            | Failure msg -> printf "Error: %s\n%!" msg
+            | exn -> printf "Unknown Error: %s\n%!" (Exn.to_string exn)
+    with
+    | End_of_file -> continue := false (* Handle Ctrl+D *)
+    | Sys_error msg -> printf "System Error: %s\n%!" msg; continue := false (* Exit on system errors *)
+    | exn -> printf "Unexpected REPL Error: %s\n%!" (Exn.to_string exn); continue := false (* Exit on other errors *)
+  done;
+  printf "Exiting Scaml REPL.\n%!"
 
 
 let () =
-  (* Use Core_unix.Command_unix explicitly *)
-  Command_unix.run
-    (Command.basic
-       ~summary:"Transpile and Run Scaml Elisp Module"
-       (* Use let%map_open provided by ppx_let *)
-       (let%map_open.Command filename = anon ("filename" %: Filename_unix.arg_type) in
-        fun () -> process_file filename)
-    )
+  (* ***** REGISTER BUILTIN IMPLEMENTATIONS ***** *)
+  Runtime.register_compile_impl scaml_compile_impl;
+  Runtime.register_interpret_impl scaml_interpret_impl;
+  (* ******************************************** *)
+
+  (* Run the REPL *)
+  run_repl ()
 
