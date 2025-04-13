@@ -1,14 +1,15 @@
 (* Runtime.ml - Runtime support for translated Elisp code using Core *)
 
 open! Core
+open! Sexplib.Std (* Added for Sexp manipulation in compile/interpret *)
 
-(* Use types/modules from the Scaml library *)
+(* Use types/modules from other library modules directly *)
 module Value = Value
-(* module Analyze = Analyze - REMOVED *)
-(* module Translate = Translate - REMOVED *)
-(* module Compiler = Compiler - REMOVED *)
-module InferredType = InferredType (* Keep if needed elsewhere, maybe not? Check usage... Value.t compare uses it implicitly. OK. *)
-(* module Interpreter = Interpreter - REMOVED *)
+module Analyze = Analyze (* Needed for compile function type *)
+module Translate = Translate (* Needed for compile function type *)
+module Compiler = Compiler (* Needed for compile function type *)
+module InferredType = InferredType
+module Interpreter = Interpreter (* Needed for interpret builtin *)
 
 
 (* --- Error Handling Helpers --- *)
@@ -22,8 +23,8 @@ let runtime_error func_name message =
   failwithf "Runtime Error in %s: %s" func_name message ()
 
 (* --- Global Environment --- *)
-let global_env : Value.t String.Table.t =
-  String.Table.create ~size:64 ()
+let global_env : Value.t Hashtbl.M(String).t =
+  Hashtbl.create (module String) ~size:64
 let register_global name (value: Value.t) =
   Hashtbl.set global_env ~key:name ~data:value
 let set_global_variable name (value: Value.t) =
@@ -242,14 +243,19 @@ let builtin_compile args =
             runtime_error "compile" "Compilation implementation not registered"
         | Some compile_fn ->
             try
+              (* 1. Convert Value.t list back to Sexp.t list *)
               let sexps = value_list_to_sexp_list code_value in
+
+              (* 2. Call the registered compilation function *)
               let exposed_env_alist = compile_fn sexps in
+
+              (* 3. Convert the resulting environment alist to a Value.t *)
               alist_to_value exposed_env_alist
+
             with
             (* Catch potential errors from the compilation pipeline *)
-            (* Use specific exception from Compiler if available *)
-            (* | Compiler.Compilation_error msg -> runtime_error "compile" (sprintf "Compilation Error: %s" msg) *)
             | Failure msg -> runtime_error "compile" (sprintf "Failed during compilation pipeline: %s" msg)
+            | Compiler.Compilation_error msg -> runtime_error "compile" (sprintf "Compilation Error: %s" msg)
             | exn -> runtime_error "compile" (sprintf "Unexpected error during compilation: %s" (Exn.to_string exn))
       end
   | _ -> arity_error "compile" (sprintf "expected 1 argument (a quoted list of expressions), got %d" (List.length args))
@@ -257,33 +263,20 @@ let builtin_compile args =
 
 (* --- Interpret Builtin Implementation --- *)
 
-(* Type signature for the function that implements interpretation *)
-type interpret_impl_t = Sexp.t list -> Value.t
-
-(* Reference to hold the registered implementation *)
-let interpret_impl_ref : interpret_impl_t option ref = ref None
-
-(* Function to register the implementation (called from main application) *)
-let register_interpret_impl (f : interpret_impl_t) : unit =
-  interpret_impl_ref := Some f
-
-(* The 'interpret' built-in function *)
 let builtin_interpret args =
   match args with
   | [ code_value ] ->
       begin
-        match !interpret_impl_ref with
-        | None ->
-            runtime_error "interpret" "Interpretation implementation not registered"
-        | Some interpret_fn ->
-            try
-              let sexps = value_list_to_sexp_list code_value in
-              (* Call the registered interpretation function *)
-              interpret_fn sexps
-              (* Return the result of the last expression *)
-            with
-            | Failure msg -> runtime_error "interpret" (sprintf "Failed during interpretation: %s" msg)
-            | exn -> runtime_error "interpret" (sprintf "Unexpected error during interpretation: %s" (Exn.to_string exn))
+        try
+          (* 1. Convert Value.t list back to Sexp.t list *)
+          let sexps = value_list_to_sexp_list code_value in
+          (* 2. Evaluate using the interpreter *)
+          (* Note: Interpreter modifies the *shared* global_env via side effects (e.g., defun) *)
+          Interpreter.eval_toplevel sexps
+          (* Return the result of the last expression *)
+        with
+         | Failure msg -> runtime_error "interpret" (sprintf "Failed during interpretation: %s" msg)
+         | exn -> runtime_error "interpret" (sprintf "Unexpected error during interpretation: %s" (Exn.to_string exn))
       end
   | _ -> arity_error "interpret" (sprintf "expected 1 argument (a quoted list of expressions), got %d" (List.length args))
 
@@ -329,7 +322,8 @@ let () =
   register "eq" builtin_eq; register "equal" builtin_equal;
   (* Execution Modes *)
   register "compile" builtin_compile; (* Uses registered implementation *)
-  register "interpret" builtin_interpret; (* Uses registered implementation *)
+  register "interpret" builtin_interpret; (* Added interpret *)
   (* Constants *)
   register_global "nil" Value.Nil; register_global "t" Value.T;
   ()
+
