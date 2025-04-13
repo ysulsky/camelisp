@@ -72,6 +72,9 @@ let rec compare (v1 : t) (v2 : t) : int =
   | Cons _, _ -> -1 | _, Cons _ -> 1
   | Vector _, _ -> -1 | _, Vector _ -> 1
   | Function _, _ -> -1 | _, Function _ -> 1
+  (* Builtin case is now implicitly handled by the Function case above *)
+  (* and the Builtin f1, Builtin f2 case *)
+  (* | Builtin _, _ -> -1 | _, Builtin _ -> 1 - REMOVED (Redundant) *)
 
 
 (* --- Helper functions --- *)
@@ -87,9 +90,12 @@ let is_nil = function
 (** Check if a value is truthy in Elisp (anything other than nil) *)
 let is_truthy v = not (is_nil v)
 
-(** Basic pretty-printer using Sexp conversion *)
-let to_string v =
+(** Basic pretty-printer using Sexp conversion (default) *)
+let default_to_string v =
   sexp_of_t v |> Sexp.to_string_hum
+
+(** Mutable reference holding the current printer function *)
+let to_string : (t -> string) ref = ref default_to_string
 
 (* Example of how list construction might look *)
 let rec list_to_value (l : t list) : t =
@@ -106,4 +112,5 @@ let rec value_to_list_opt (v : t) : t list option =
        | None -> None (* Improper list *)
       )
   | _ -> None (* Not a list *)
+
 

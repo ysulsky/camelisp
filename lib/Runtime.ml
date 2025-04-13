@@ -1,19 +1,15 @@
 (* Runtime.ml - Runtime support for translated Elisp code using Core *)
 
 open! Core
-open! Sexplib.Std (* Added for Sexp manipulation in compile/interpret *)
+(* open! Sexplib.Std - REMOVED *)
 
-(* Use types/modules from other library modules directly *)
+(* Use types/modules from the Scaml library *)
 module Value = Value
-module Analyze = Analyze (* Needed for compile function type *)
-module Translate = Translate (* Needed for compile function type *)
-module Compiler = Compiler (* Needed for compile function type *)
-module InferredType = InferredType
-module Interpreter = Interpreter (* Needed for interpret builtin *)
+module InferredType = InferredType (* Keep if needed elsewhere, maybe not? Check usage... Value.t compare uses it implicitly. OK. *)
 
 
 (* --- Error Handling Helpers --- *)
-let value_type_to_string v = Value.to_string v
+let value_type_to_string v = !Value.to_string v (* Use the ref *)
 let type_error func_name expected_type actual_value =
   failwithf "Runtime Error in %s: Type error, expected %s but got %s"
     func_name expected_type (value_type_to_string actual_value) ()
@@ -23,14 +19,18 @@ let runtime_error func_name message =
   failwithf "Runtime Error in %s: %s" func_name message ()
 
 (* --- Global Environment --- *)
-let global_env : Value.t Hashtbl.M(String).t =
-  Hashtbl.create (module String) ~size:64
+(* Use String.Table.create as requested *)
+let global_env : Value.t String.Table.t =
+  String.Table.create ~size:64 ()
 let register_global name (value: Value.t) =
+  (* Use String.Table functions *)
   Hashtbl.set global_env ~key:name ~data:value
 let set_global_variable name (value: Value.t) =
+  (* Use String.Table functions *)
   Hashtbl.set global_env ~key:name ~data:value;
   value (* setq returns the value *)
 let lookup_variable (name : string) : Value.t =
+  (* Use String.Table functions *)
   match Hashtbl.find global_env name with
   | Some v -> v
   | None -> runtime_error "lookup_variable" (sprintf "Variable '%s' is void" name)
@@ -78,13 +78,17 @@ let builtin_setcdr args =
   | [not_cons; _] -> type_error "setcdr" "cons cell" not_cons
   | _ -> arity_error "setcdr" (sprintf "expected 2 arguments, got %d" (List.length args))
 
+(* list function: takes any number of args and returns them as a list *)
+let builtin_list args = Value.list_to_value args
+
 
 (* Simplified Arithmetic - Assume integers for now *)
 let builtin_plus args =
   List.fold args ~init:(Value.Int 0) ~f:(fun acc v ->
     match acc, v with
     | Value.Int ia, Value.Int iv -> Value.Int (ia + iv)
-    | _, other -> type_error "+" "integer" other
+    (* Add float handling or type error *)
+    | _, other -> type_error "+" "integer" other (* Simplified error check *)
   )
 let builtin_minus args =
   match args with
@@ -171,60 +175,91 @@ let builtin_equal args =
   let b = List.nth_exn args 1 in
   if [%compare.equal: Value.t] a b then Value.T else Value.Nil (* Use derived Core equality *)
 
-(* --- Value <-> Sexp Conversion Helpers (Simplified) --- *)
-let rec sexp_to_value (s : Sexp.t) : Value.t =
-  match s with
-  | Sexp.Atom "nil" -> Value.Nil
-  | Sexp.Atom "t" -> Value.T
-  | Sexp.Atom str ->
-      (try Value.Int (Int.of_string str) with _ ->
-      try Value.Float (Float.of_string str) with _ ->
-      if String.is_prefix str ~prefix:":"
-      then Value.Keyword (String.drop_prefix str 1)
-      else Value.Symbol { name = str }) (* Treat others as symbols *)
-  | Sexp.List [] -> Value.Nil
-  | Sexp.List l -> list_to_value (List.map l ~f:sexp_to_value)
-and list_to_value = function (* Helper *)
-  | [] -> Value.Nil
-  | h :: t -> Value.Cons { car = ref h; cdr = ref (list_to_value t) }
+(* --- Value <-> Sexp Conversion Helpers (Modified for Printing) --- *)
 
-let rec value_to_sexp (v : Value.t) : Sexp.t =
+(* Mutually recursive functions for Lisp-style printing *)
+let rec value_to_sexp (v : Value.t) : Sexp.t = (* Removed semicolon *)
   match v with
   | Value.Nil -> Sexp.Atom "nil"
   | Value.T -> Sexp.Atom "t"
   | Value.Int i -> Sexp.Atom (Int.to_string i)
   | Value.Float f -> Sexp.Atom (Float.to_string f)
-  | Value.String s -> Sexp.Atom s (* Represent string as atom for simplicity? *)
+  | Value.String s -> Sexp.Atom s (* Assuming Sexp parser handles quotes *)
   | Value.Symbol sd -> Sexp.Atom sd.name
   | Value.Keyword k -> Sexp.Atom (":" ^ k)
-  | Value.Cons { car; cdr } -> Sexp.List (value_to_sexp !car :: list_sexp !cdr)
+  | Value.Cons { car; cdr } ->
+      (* Handle list printing *)
+      let car_sexp = value_to_sexp !car in
+      let (cdr_sexps, final_cdr) = sexps_of_list_cdr !cdr in
+      let all_sexps = car_sexp :: cdr_sexps in
+      (match final_cdr with
+       | Value.Nil -> Sexp.List all_sexps (* Proper list *)
+       | other -> (* Improper list / dotted pair *)
+           Sexp.List (all_sexps @ [Sexp.Atom "."; value_to_sexp other])
+      )
   | Value.Vector arr -> Sexp.List (Sexp.Atom "vector" :: List.map (Array.to_list arr) ~f:value_to_sexp)
   | Value.Function _ -> Sexp.Atom "<function>"
   | Value.Builtin _ -> Sexp.Atom "<builtin>"
-  | Value.Char c -> Sexp.Atom (String.of_char c) (* Added Char *)
-and list_sexp v = match v with (* Helper for proper lists *)
-    | Value.Nil -> []
-    | Value.Cons {car; cdr} -> value_to_sexp !car :: list_sexp !cdr
-    | other -> [Sexp.Atom "."; value_to_sexp other] (* Dotted pair *)
+  | Value.Char c -> Sexp.Atom (String.of_char c)
+
+(* Helper to convert the cdr of a list into a list of Sexp.t *)
+(* Returns the list of elements and the final cdr (Nil or dotted value) *)
+and sexps_of_list_cdr (cdr_val : Value.t) : Sexp.t list * Value.t =
+  match cdr_val with
+  | Value.Nil -> ([], Value.Nil) (* Proper list end *)
+  | Value.Cons { car; cdr } ->
+      let car_sexp = value_to_sexp !car in
+      let (rest_sexps, final_cdr) = sexps_of_list_cdr !cdr in
+      (car_sexp :: rest_sexps, final_cdr)
+  | other -> ([], other) (* Improper list end *)
+
+
+(* Original sexp_to_value - keep for non-printing conversion if needed *)
+let rec sexp_to_value_internal (s : Sexp.t) : Value.t =
+  match s with
+  | Sexp.Atom "nil" -> Value.Nil
+  | Sexp.Atom "t" -> Value.T
+  | Sexp.Atom str ->
+      (try Value.Int (Int.of_string str) with _ -> (* Catch any exception *)
+      try Value.Float (Float.of_string str) with _ -> (* Catch any exception *)
+      if String.is_prefix str ~prefix:":"
+      then Value.Keyword (String.drop_prefix str 1)
+      else Value.Symbol { name = str }) (* Treat others as symbols *)
+  | Sexp.List [] -> Value.Nil
+  | Sexp.List l -> list_to_value_internal (List.map l ~f:sexp_to_value_internal)
+and list_to_value_internal = function (* Helper *)
+  | [] -> Value.Nil
+  | h :: t -> Value.Cons { car = ref h; cdr = ref (list_to_value_internal t) }
+
+(* Use the internal version for converting Sexp input *)
+let sexp_to_value = sexp_to_value_internal
+
+(* Use the Lisp-style printing version for converting Value output *)
+let value_to_string_lisp v = value_to_sexp v |> Sexp.to_string_hum
+
+(* Update the global printer function reference in Value.ml *)
+let () = Value.to_string := value_to_string_lisp
 
 
 let value_list_to_sexp_list (code_value : Value.t) : Sexp.t list =
   match Value.value_to_list_opt code_value with
-  | Some values -> List.map values ~f:value_to_sexp
+  | Some values -> List.map values ~f:value_to_sexp (* Use the printing version *)
   | None -> runtime_error "(value->sexp)" "Argument must be a proper list of S-expressions"
 
 
 let alist_to_value (alist : (string * Value.t) list) : Value.t =
   let value_pairs = List.map alist ~f:(fun (name, v) ->
+      (* Create (sym . val) pair *)
       Value.Cons { car = ref (Value.Symbol {name = name}); cdr = ref v }
     )
   in
-  list_to_value value_pairs
+  (* Convert list of pairs into a Value.t list *)
+  Value.list_to_value value_pairs
 
 (* --- Compile Builtin Implementation --- *)
 
 (* Type signature for the function that implements the compilation pipeline *)
-type compile_impl_t = Sexp.t list -> (string * Value.t) list
+type compile_impl_t = Sexp.t list -> (string * Value.t) list (* Need Sexplib.Sexp *)
 
 (* Reference to hold the registered implementation *)
 let compile_impl_ref : compile_impl_t option ref = ref None
@@ -243,19 +278,14 @@ let builtin_compile args =
             runtime_error "compile" "Compilation implementation not registered"
         | Some compile_fn ->
             try
-              (* 1. Convert Value.t list back to Sexp.t list *)
               let sexps = value_list_to_sexp_list code_value in
-
-              (* 2. Call the registered compilation function *)
               let exposed_env_alist = compile_fn sexps in
-
-              (* 3. Convert the resulting environment alist to a Value.t *)
               alist_to_value exposed_env_alist
-
             with
             (* Catch potential errors from the compilation pipeline *)
+            (* Use specific exception from Compiler if available *)
+            (* | Compiler.Compilation_error msg -> runtime_error "compile" (sprintf "Compilation Error: %s" msg) *)
             | Failure msg -> runtime_error "compile" (sprintf "Failed during compilation pipeline: %s" msg)
-            | Compiler.Compilation_error msg -> runtime_error "compile" (sprintf "Compilation Error: %s" msg)
             | exn -> runtime_error "compile" (sprintf "Unexpected error during compilation: %s" (Exn.to_string exn))
       end
   | _ -> arity_error "compile" (sprintf "expected 1 argument (a quoted list of expressions), got %d" (List.length args))
@@ -263,20 +293,35 @@ let builtin_compile args =
 
 (* --- Interpret Builtin Implementation --- *)
 
+(* Type signature for the function that implements interpretation *)
+type interpret_impl_t = Sexp.t list -> Value.t (* Need Sexplib.Sexp *)
+
+(* Reference to hold the registered implementation *)
+let interpret_impl_ref : interpret_impl_t option ref = ref None
+
+(* Function to register the implementation (called from main application) *)
+let register_interpret_impl (f : interpret_impl_t) : unit =
+  interpret_impl_ref := Some f
+
+(* The 'interpret' built-in function *)
 let builtin_interpret args =
   match args with
   | [ code_value ] ->
       begin
-        try
-          (* 1. Convert Value.t list back to Sexp.t list *)
-          let sexps = value_list_to_sexp_list code_value in
-          (* 2. Evaluate using the interpreter *)
-          (* Note: Interpreter modifies the *shared* global_env via side effects (e.g., defun) *)
-          Interpreter.eval_toplevel sexps
-          (* Return the result of the last expression *)
-        with
-         | Failure msg -> runtime_error "interpret" (sprintf "Failed during interpretation: %s" msg)
-         | exn -> runtime_error "interpret" (sprintf "Unexpected error during interpretation: %s" (Exn.to_string exn))
+        match !interpret_impl_ref with
+        | None ->
+            runtime_error "interpret" "Interpretation implementation not registered"
+        | Some interpret_fn ->
+            try
+              let sexps = value_list_to_sexp_list code_value in
+              (* Call the registered interpretation function *)
+              let (_last_val : Value.t) = interpret_fn sexps in
+              (* Side effects (like defun) modify global_env. *)
+              (* Return the current global environment as an alist. *)
+              alist_to_value (Hashtbl.to_alist global_env)
+            with
+            | Failure msg -> runtime_error "interpret" (sprintf "Failed during interpretation: %s" msg)
+            | exn -> runtime_error "interpret" (sprintf "Unexpected error during interpretation: %s" (Exn.to_string exn))
       end
   | _ -> arity_error "interpret" (sprintf "expected 1 argument (a quoted list of expressions), got %d" (List.length args))
 
@@ -310,7 +355,8 @@ let () =
   (* List Functions *)
   register "cons" builtin_cons; register "car" builtin_car; register "cdr" builtin_cdr;
   register "setcar" builtin_setcar; register "setcdr" builtin_setcdr;
-  register "assoc" builtin_assoc; (* Added assoc *)
+  register "assoc" builtin_assoc;
+  register "list" builtin_list; (* Added list *)
   (* Arithmetic Functions *)
   register "+" builtin_plus; register "-" builtin_minus; register "*" builtin_multiply; register "/" builtin_divide;
   (* Type Predicates *)
@@ -322,7 +368,7 @@ let () =
   register "eq" builtin_eq; register "equal" builtin_equal;
   (* Execution Modes *)
   register "compile" builtin_compile; (* Uses registered implementation *)
-  register "interpret" builtin_interpret; (* Added interpret *)
+  register "interpret" builtin_interpret; (* Uses registered implementation *)
   (* Constants *)
   register_global "nil" Value.Nil; register_global "t" Value.T;
   ()
