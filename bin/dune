@@ -1,0 +1,9 @@
+(executable
+ (name main) ; Name of the main executable
+ (public_name scamlc) ; How users might invoke it
+ (modes byte exe)
+ (modules main)
+ ; Depend on the scaml library
+ (libraries scaml core core_unix.command_unix)
+ (preprocess
+  (pps ppx_let ppx_inline_test)))

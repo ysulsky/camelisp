@@ -1,0 +1,9 @@
+(library
+ (name scaml)
+ (public_name scaml)
+ ; Explicitly list modules in dependency order (Value/InferredType first)
+ (modules Value InferredType Runtime Analyze Compiler Translate)
+ (libraries base core core_unix.filename_unix sexplib fmt dynlink unix str)
+ (preprocess
+  (pps ppx_compare ppx_sexp_conv ppx_inline_test))
+ (flags (:standard -w -8))) ; Suppress warning 8 (pattern match not exhaustive) for now if needed
