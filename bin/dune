@@ -4,6 +4,6 @@
  (modes byte exe)
  (modules main)
  ; Depend on the scaml library
- (libraries scaml core core_unix.command_unix)
+ (libraries scaml core core_unix.command_unix readline)
  (preprocess
   (pps ppx_let ppx_inline_test)))

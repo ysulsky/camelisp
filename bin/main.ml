@@ -1,4 +1,4 @@
-(* bin/main.ml - REPL for Scaml (Refactored for Value.t Parser) *)
+(* bin/main.ml - REPL for Scaml with Readline Support *)
 
 open! Core
 (* REMOVED: Sexplib related opens *)
@@ -42,7 +42,7 @@ let scaml_interpret_impl (code_list : Value.t list) : Value.t =
     | exn -> failwith ("Unexpected interpretation error: " ^ Exn.to_string exn)
 
 
-(* --- REPL Implementation --- *)
+(* --- REPL Implementation with Readline --- *)
 
 let run_repl () =
   (* Initialize the REPL's lexical environment *)
@@ -53,43 +53,42 @@ let run_repl () =
   Runtime.register_global "exit" (Value.Builtin (fun _ -> continue := false; Value.Nil));
 
   printf "Welcome to Scaml REPL!\n";
-  printf "Using new Menhir/Ocamllex parser.\n";
-  printf "Use (exit) to quit.\n";
+  printf "Using Readline for input.\n";
+  printf "Use (exit) or Ctrl+D to quit.\n%!";
 
-  (* --- REPL Loop using Parse.from_channel --- *)
-  (* No complex refill logic needed now *)
-
-  printf "> %!"; (* Print initial prompt *)
+  (* REPL Loop using Readline *)
   while !continue do
-    try
-      (* Parse directly from stdin channel *)
-      match Parse.from_channel ~filename:"<stdin>" In_channel.stdin with
-      | Ok value -> (* Successfully parsed one Value.t *)
-          begin try
-            (* Evaluate the parsed value *)
-            let result = Interpreter.eval !repl_env value in
-            (* Print result *)
-            printf "%s\n%!" (!Value.to_string result);
-            printf "> %!" (* Prompt for next input *)
-          with
-           (* Handle runtime errors during evaluation *)
-           | Failure msg -> printf "Error: %s\n> %!" msg
-           | exn -> printf "Unknown Error: %s\n> %!" (Exn.to_string exn)
-          end
-      | Error msg -> (* Handle parsing error from Parse.from_channel *)
-           printf "%s\n" msg;
-           (* Attempt to recover: Maybe flush stdin? Depends on OS/terminal. *)
-           (* For simplicity, just print error and prompt again *)
-           printf "> %!"
+    match Readline.readline ~prompt:"> " () with
+    | None -> (* EOF (Ctrl+D) *)
+        continue := false;
+        printf "\n%!" (* Print newline after Ctrl+D *)
+    | Some line ->
+        (* Add non-empty lines to history *)
+        if not (String.is_empty (String.strip line)) then
+          Readline.add_history line;
 
-    with
-     (* End_of_file is the expected way to exit the loop when stdin closes *)
-     | End_of_file -> continue := false
-     (* Catch other unexpected errors *)
-     | Sys_error msg -> printf "System Error: %s\n%!" msg; continue := false
-     | exn -> printf "Unexpected REPL Error: %s\n%!" (Exn.to_string exn); continue := false
+        (* Parse potentially multiple expressions from the line *)
+        match Parse.multiple_from_string ~filename:"<stdin>" line with
+        | Error msg ->
+            (* Handle parsing error *)
+            printf "Parse Error: %s\n%!" msg
+        | Ok values ->
+            (* Evaluate each parsed value sequentially *)
+            let last_result = ref Value.Nil in (* Keep track of the last result *)
+            begin try
+              List.iter values ~f:(fun value ->
+                let result = Interpreter.eval !repl_env value in
+                last_result := result (* Update last result *)
+              );
+              (* Print the result of the *last* expression evaluated *)
+              printf "%s\n%!" (!Value.to_string !last_result);
+            with
+            (* Handle runtime errors during evaluation *)
+            | Failure msg -> printf "Runtime Error: %s\n%!" msg
+            | exn -> printf "Unexpected Error: %s\n%!" (Exn.to_string exn)
+            end
   done;
-  printf "\nExiting Scaml REPL.\n%!"
+  printf "Exiting Scaml REPL.\n%!"
 
 
 let () =
@@ -100,4 +99,6 @@ let () =
   (* ******************************************** *)
 
   (* Run the REPL *)
+  Readline.init ();
   run_repl ()
+
