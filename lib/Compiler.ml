@@ -6,12 +6,15 @@ open! Core
 (* Use types from other library modules directly *)
 module Value = Value
 
-let ocamlopt_path = "ocamlopt" (* Or use `ocamlfind query ocamlopt` *)
-let ocamlc_path = "ocamlc" (* Or use `ocamlfind query ocamlc` *)
-(* These paths might need adjustment based on the build environment *)
-(* Ensure these relative paths are correct from where dune build is run *)
-let include_paths = ["_build/default/lib/"] (* Path to find scaml library internals like Value *)
-let library_paths = ["_build/default/lib/"] (* Path to find scaml.cma *)
+(* --- Compiler Paths --- *)
+(* Use ocamlfind to handle package paths *)
+let ocamlfind_path = "ocamlfind"
+(* We still need the base compiler name for ocamlfind *)
+let ocamlc_path = "ocamlc"
+(* Keep include paths for project's own modules *)
+let include_paths = ["_build/default/lib/"]
+(* Library paths for linking against scaml.cma itself *)
+let library_paths = ["_build/default/lib/"]
 
 
 exception Compilation_error of string
@@ -42,7 +45,6 @@ let () =
 (** Compiles an OCaml source string to a .cma file and loads it *)
 let compile_and_load_string (ocaml_code : string) : (unit -> Value.t) * (unit -> (string * Value.t) list) =
   let ml_filename = Filename_unix.temp_file "scaml_generated_" ".ml" in
-  (* *** FIXED: Use Filename.chop_extension (from Core) *** *)
   let base_filename = Filename.chop_extension ml_filename in
   let cmo_filename = base_filename ^ ".cmo" in
   let cma_filename = base_filename ^ ".cma" in
@@ -58,18 +60,27 @@ let compile_and_load_string (ocaml_code : string) : (unit -> Value.t) * (unit ->
     Out_channel.write_all ml_filename ~data:ocaml_code;
 
     (* 2. Compile the .ml to .cmo (bytecode object file) *)
+    (* Use ocamlfind to invoke ocamlc with package support *)
     let include_flags = List.map include_paths ~f:(sprintf "-I %s") |> String.concat ~sep:" " in
-    let compile_byte_cmd = sprintf "%s -c %s -o %s %s" ocamlc_path include_flags cmo_filename ml_filename in
+    (* *** MODIFIED HERE: Use ocamlfind with -package and -linkpkg *** *)
+    let compile_byte_cmd =
+      sprintf "%s %s -package core -linkpkg -c %s -o %s %s"
+        ocamlfind_path ocamlc_path include_flags cmo_filename ml_filename
+    in
     (* Printf.printf "Executing: %s\n%!" compile_byte_cmd; *)
     if Sys_unix.command compile_byte_cmd <> 0 then
       raise (Compilation_error (sprintf "OCaml compilation failed for %s. Command: %s" ml_filename compile_byte_cmd));
 
     (* 3. Link the .cmo into a .cma (bytecode library archive) *)
-    (* We link against the main scaml library (which should include Runtime, Value etc) *)
+    (* Use ocamlfind for linking as well *)
     let lib_flags = List.map library_paths ~f:(sprintf "-I %s") |> String.concat ~sep:" " in
-    (* Link command needs the scaml library itself *)
-    (* Ensure scaml.cma is available at link time *)
-    let link_byte_cmd = sprintf "%s -a %s scaml.cma -o %s %s" ocamlc_path lib_flags cma_filename cmo_filename in
+    (* *** MODIFIED HERE: Use ocamlfind with -package and -linkpkg *** *)
+    (* Ensure scaml.cma is available at link time (Dune should handle this) *)
+    (* We still need to specify scaml.cma as an input file to link against *)
+    let link_byte_cmd =
+      sprintf "%s %s -package core -linkpkg -a %s %s -o %s %s"
+        ocamlfind_path ocamlc_path lib_flags "scaml.cma" cma_filename cmo_filename
+    in
     (* Printf.printf "Executing: %s\n%!" link_byte_cmd; *)
     if Sys_unix.command link_byte_cmd <> 0 then
        raise (Compilation_error (sprintf "OCaml linking failed for %s. Command: %s" ml_filename link_byte_cmd));
@@ -102,3 +113,4 @@ let compile_and_load_string (ocaml_code : string) : (unit -> Value.t) * (unit ->
     Exn.handle_uncaught ~exit:false (fun () -> Sys_unix.remove cma_filename);
     ()
   )
+
