@@ -58,8 +58,12 @@ let get_args_list (cdr_val : Value.t) (form_name : string) : Value.t list =
     | Some args -> args
     | None -> failwithf "Malformed %s: arguments form an improper list" form_name ()
 
-(* Mutually recursive evaluation functions defined using 'let rec ... and ...' *)
+(* Forward declaration for mutual recursion *)
 let rec eval (env : eval_env) (value : Value.t) : Value.t =
+  eval_internal env value
+
+(* Main eval function *)
+and eval_internal (env : eval_env) (value : Value.t) : Value.t =
   match value with
   (* Self-evaluating types *)
   | Value.Nil | Value.T | Value.Int _ | Value.Float _ | Value.String _
@@ -77,6 +81,11 @@ let rec eval (env : eval_env) (value : Value.t) : Value.t =
           (match Value.value_to_list_opt cdr with (* Use direct cdr *)
            | Some [data] -> data (* Return data unevaluated *)
            | _ -> failwith "Malformed quote: expected exactly one argument")
+
+      | Value.Symbol {name="quasiquote"} ->
+          (match Value.value_to_list_opt cdr with
+           | Some [template] -> eval_quasiquote_internal env template
+           | _ -> failwith "Malformed quasiquote: expected exactly one argument")
 
       | Value.Symbol {name="if"} ->
           (match get_args_list cdr "if" with (* Use direct cdr *)
@@ -126,6 +135,58 @@ let rec eval (env : eval_env) (value : Value.t) : Value.t =
           )
      end (* End match car *)
 
+(* --- Quasiquote Helper --- *)
+(* ***** REVISED QUASIQUOTE LOGIC ***** *)
+and eval_quasiquote_internal (env : eval_env) (template : Value.t) : Value.t =
+  match template with
+  (* Unquote evaluates its argument *)
+  | Value.Cons { car = Value.Symbol {name="unquote"}; cdr = rest } ->
+      (match Value.value_to_list_opt rest with
+       | Some [expr_to_eval] -> eval env expr_to_eval
+       | _ -> failwith "Malformed unquote: expected exactly one argument")
+
+  (* Unquote-splicing is invalid unless inside a list context (handled below) *)
+  | Value.Cons { car = Value.Symbol {name="unquote-splicing"}; cdr = _} ->
+      failwith "Invalid unquote-splicing: ,@ must appear directly within a list"
+
+  (* Recursively build lists *)
+  | Value.Cons { car; cdr } -> begin
+      match car with
+      (* Handle splicing at the start of a list *)
+      | Value.Cons { car = Value.Symbol {name="unquote-splicing"}; cdr = splice_rest } ->
+          let list_to_splice =
+            match Value.value_to_list_opt splice_rest with
+            | Some [expr_to_eval] -> eval env expr_to_eval
+            | _ -> failwith "Malformed unquote-splicing: expected exactly one argument"
+          in
+          let elements_to_splice = match Value.value_to_list_opt list_to_splice with
+            | Some elements -> elements
+            | None -> failwith "unquote-splicing: expression did not evaluate to a proper list"
+          in
+          (* Recursively process the rest of the template list *)
+          let processed_cdr = eval_quasiquote_internal env cdr in
+          (* Append the spliced elements to the processed rest *)
+          Value.list_append elements_to_splice processed_cdr (* Assumes list_append exists *)
+
+      (* Normal cons cell processing *)
+      | _ ->
+          let processed_car = eval_quasiquote_internal env car in
+          let processed_cdr = eval_quasiquote_internal env cdr in
+          (* Optimization: if car and cdr are physically identical to originals, *)
+          (* reuse the original template cons cell? Only if immutable. *)
+          (* Since using mutable cells, always create a new one. *)
+          Value.Cons { car = processed_car; cdr = processed_cdr }
+    end
+
+  (* Recursively build vectors *)
+  | Value.Vector arr ->
+      let new_arr = Array.map arr ~f:(eval_quasiquote_internal env) in
+      Value.Vector new_arr
+
+  (* Atoms evaluate to themselves *)
+  | other_atom -> other_atom
+
+(* Removed eval_quasiquote_list helper - logic merged above *)
 
 and eval_progn (env : eval_env) (forms : Value.t list) : Value.t =
   match forms with
