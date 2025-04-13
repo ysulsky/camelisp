@@ -4,7 +4,7 @@ open Value (* Use Value.t and helpers directly *)
 
 (* Helper function to build reader macro expansions using Value.t *)
 let make_reader_macro sym expr =
-  (* list_to_value creates the refs needed *)
+  (* list_to_value creates the mutable structure if needed *)
   list_to_value [ sym; expr ]
 
 %}
@@ -21,16 +21,22 @@ let make_reader_macro sym expr =
 %token NIL_TOKEN T_TOKEN /* Specific tokens for nil and t */
 %token EOF
 
-/* Define start symbol and its type */
-%start <Value.t> main
+/* Define start symbol and its type - CHANGED to repl_entry */
+%start <Value.t> repl_entry
 %type <Value.t> sexp atom list_content vector_content
 %type <Value.t list> sexp_list /* For sequences inside lists/vectors */
 
 %% /* Grammar rules */
 
-main:
-  | sexp EOF { $1 }
+/* New entry point for REPL - Parses one expression without requiring EOF */
+repl_entry:
+  | sexp { $1 }
   ;
+
+/* Keep original main rule if needed for file parsing later, */
+/* but it won't be the default entry point anymore.       */
+/* main: sexp EOF { $1 } ; */
+
 
 sexp:
   | atom                                     { $1 }
@@ -60,7 +66,7 @@ list_content:
     /* empty list '()' -> Nil */
   | /* epsilon */                            { Nil }
     /* Proper list: (a b c) */
-  | sexp_list                                { list_to_value $1 } (* Builds Cons with refs *)
+  | sexp_list                                { list_to_value $1 } (* Builds Cons *)
     /* Dotted list: (a b . c) */
   | sexp_list DOT sexp                       { list_to_value_dotted $1 $3 } (* Use helper *)
   ;
@@ -78,3 +84,4 @@ sexp_list:
   ;
 
 %%
+
