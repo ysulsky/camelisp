@@ -1,15 +1,12 @@
 (library
  (name scaml)
  (public_name scaml)
- ; Explicitly list modules in dependency order.
- ; Runtime only depends on Value/InferredType.
- ; Interpreter depends on Runtime.
- ; Analyze depends on Value/InferredType.
- ; Compiler depends on Value.
- ; Translate depends on Value/InferredType/Analyze/Runtime.
- (modules Value InferredType Analyze Compiler Runtime Interpreter Translate)
- (libraries base core core_unix.filename_unix sexplib fmt dynlink unix str)
+ ; Add new modules, keep existing ones in order
+ (modules Value InferredType Analyze Compiler Runtime Interpreter Parse Lexer Parser Translate)
+ (libraries base core core_unix.filename_unix sexplib fmt dynlink unix str menhirLib)
  (preprocess
-  (pps ppx_compare ppx_sexp_conv ppx_inline_test ppx_let))
- (flags (:standard -w -8))) ; Suppress warning 8 (pattern match not exhaustive) for now if needed
+  (pps ppx_compare ppx_sexp_conv ppx_inline_test ppx_let)) ; Keep sexp_conv for Value.t
+ (flags (:standard -w -8)))
 
+(ocamllex Lexer)
+(menhir (modules Parser))

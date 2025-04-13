@@ -1,29 +1,24 @@
-(* bin/main.ml - REPL for Scaml *)
+(* bin/main.ml - REPL for Scaml (Refactored for Value.t Parser) *)
 
 open! Core
-(* open Sexplib - REMOVED *)
-(* open! Sexplib.Std - REMOVED *)
-(* open! Scaml - Using qualified names initially, now aliases *)
+(* REMOVED: Sexplib related opens *)
 
 (* Module Aliases for convenience *)
-module Sexp = Sexplib.Sexp
-module Lexer = Sexplib.Lexer (* Still needed for refill function logic? No.*)
-module Parser = Sexplib.Parser (* Still needed for token types in refill? No.*)
+module Parse = Scaml.Parse (* Use the new parser module *)
 module Compiler = Scaml.Compiler
 module Runtime = Scaml.Runtime
 module Value = Scaml.Value
 module Interpreter = Scaml.Interpreter
 module Analyze = Scaml.Analyze
 module Translate = Scaml.Translate
-module Lexing = Lexing (* Add alias for Lexing *)
 
 
 (* --- Compile Implementation (for 'compile' built-in) --- *)
-(* This function encapsulates the pipeline previously attempted in Runtime *)
-let scaml_compile_impl (sexps : Sexp.t list) : (string * Value.t) list =
+(* This function now takes Value.t list (representing quoted code) *)
+let scaml_compile_impl (code_list : Value.t list) : (string * Value.t) list =
   try
-     (* 1. Analyze *)
-     let typed_asts, final_env_types = Analyze.analyze_toplevel sexps in
+     (* 1. Analyze - Needs to take Value.t list *)
+     let typed_asts, final_env_types = Analyze.analyze_toplevel code_list in
      (* 2. Translate *)
      let ocaml_code = Translate.translate_toplevel typed_asts final_env_types in
      (* 3. Compile and Load *)
@@ -37,10 +32,11 @@ let scaml_compile_impl (sexps : Sexp.t list) : (string * Value.t) list =
    | exn -> failwith ("Unexpected compilation pipeline error: " ^ Exn.to_string exn)
 
 (* --- Interpret Implementation (for 'interpret' built-in) --- *)
-let scaml_interpret_impl (sexps : Sexp.t list) : Value.t =
+(* This function now takes Value.t list *)
+let scaml_interpret_impl (code_list : Value.t list) : Value.t =
     try
         (* Evaluate using the interpreter's top-level function *)
-        Interpreter.eval_toplevel sexps
+        Interpreter.eval_toplevel code_list
     with
     | Failure msg -> failwith ("Interpretation Error: " ^ msg)
     | exn -> failwith ("Unexpected interpretation error: " ^ Exn.to_string exn)
@@ -57,106 +53,51 @@ let run_repl () =
   Runtime.register_global "exit" (Value.Builtin (fun _ -> continue := false; Value.Nil));
 
   printf "Welcome to Scaml REPL!\n";
-  printf "Handles multi-line input, comments, ' , and . notation.\n";
+  printf "Using new Menhir/Ocamllex parser.\n";
   printf "Use (exit) to quit.\n";
 
-  (* --- Lexing State (Simplified) --- *)
-  (* We only need to track paren level for the prompt now *)
-  let paren_level = ref 0 in
-  let line_buffer = ref "" in (* Buffer for the current line being fed *)
-  let line_pos = ref 0 in (* Position within the current line_buffer *)
-  let eof_reached = ref false in (* Track if stdin EOF occurred *)
+  (* --- REPL Loop using Parse.from_channel --- *)
+  (* No complex refill logic needed now *)
 
-  (* Refill function for Lexing.from_function *)
-  let refill_lexbuf (buf : Bytes.t) (len : int) : int =
-    if !eof_reached then 0 (* Don't try to read past EOF *)
-    else if !line_pos >= String.length !line_buffer then begin
-      (* Need a new line from stdin *)
-      let prompt = if !paren_level <= 0 then "> " else "  " in
-      printf "%s%!" prompt;
-      match In_channel.input_line In_channel.stdin with
-      | None -> eof_reached := true; 0 (* EOF *)
-      | Some line ->
-          (* Basic paren tracking for prompt - imperfect but better than nothing *)
-          String.iter line ~f:(fun char ->
-              match char with
-              | '(' -> Int.incr paren_level
-              | ')' -> Int.decr paren_level
-              | _ -> ()
-          );
-          if !paren_level < 0 then paren_level := 0; (* Reset on likely error *)
-
-          line_buffer := line ^ "\n"; (* Store new line with newline *)
-          line_pos := 0;
-          let bytes_to_copy = min len (String.length !line_buffer) in
-          Bytes.From_string.blit
-             ~src:!line_buffer ~src_pos:0
-             ~dst:buf ~dst_pos:0
-             ~len:bytes_to_copy;
-          line_pos := bytes_to_copy; (* Update position in line_buffer *)
-          bytes_to_copy
-    end else begin
-      (* Still data left in line_buffer *)
-      let remaining_in_line = String.length !line_buffer - !line_pos in
-      let bytes_to_copy = min len remaining_in_line in
-       Bytes.From_string.blit
-         ~src:!line_buffer ~src_pos:!line_pos
-         ~dst:buf ~dst_pos:0
-         ~len:bytes_to_copy;
-      line_pos := !line_pos + bytes_to_copy;
-      bytes_to_copy
-    end
-  in
-
-  (* Create the lexbuf that reads from stdin via refill_lexbuf *)
-  let lexbuf = Lexing.from_function refill_lexbuf in
-
+  printf "> %!"; (* Print initial prompt *)
   while !continue do
     try
-      (* Use scan_sexp_opt which takes the lexbuf directly *)
-      match Sexp.scan_sexp_opt lexbuf with
-      | Some sexp ->
-          (* Successfully parsed one S-expression *)
-          paren_level := 0; (* Reset prompt level after successful parse *)
+      (* Parse directly from stdin channel *)
+      match Parse.from_channel ~filename:"<stdin>" In_channel.stdin with
+      | Ok value -> (* Successfully parsed one Value.t *)
           begin try
-            (* Evaluate *)
-            let result = Interpreter.eval !repl_env sexp in
-            (* Print *)
-            printf "%s\n%!" ((!Value.to_string) result)
+            (* Evaluate the parsed value *)
+            let result = Interpreter.eval !repl_env value in
+            (* Print result *)
+            printf "%s\n%!" (!Value.to_string result);
+            printf "> %!" (* Prompt for next input *)
           with
-          (* Handle runtime errors during evaluation *)
-          | Failure msg -> printf "Error: %s\n%!" msg
-          | exn -> printf "Unknown Error: %s\n%!" (Exn.to_string exn)
+           (* Handle runtime errors during evaluation *)
+           | Failure msg -> printf "Error: %s\n> %!" msg
+           | exn -> printf "Unknown Error: %s\n> %!" (Exn.to_string exn)
           end
-      | None ->
-          (* scan_sexp_opt returned None, meaning clean EOF *)
-          continue := false
+      | Error msg -> (* Handle parsing error from Parse.from_channel *)
+           printf "%s\n" msg;
+           (* Attempt to recover: Maybe flush stdin? Depends on OS/terminal. *)
+           (* For simplicity, just print error and prompt again *)
+           printf "> %!"
 
     with
-    (* Catch specific parsing errors if scan_sexp_opt raises them *)
-    | Sexp.Parse_error { err_msg; _ } ->
-        printf "Parse Error: %s\n%!" err_msg;
-        paren_level := 0; (* Reset prompt level *)
-        Lexing.flush_input lexbuf; (* Attempt to clear lexbuf state *)
-        line_buffer := ""; line_pos := 0; eof_reached := false (* Reset line buffer *)
-    | Failure msg when String.is_prefix msg ~prefix:"Sexplib.Conv.of_sexp_error" ->
-         printf "Parse Error: %s\n%!" msg;
-         paren_level := 0; Lexing.flush_input lexbuf; line_buffer := ""; line_pos := 0; eof_reached := false
-    (* Catch EOF if refill_lexbuf hits it unexpectedly (should be handled by None case) *)
-    | End_of_file -> continue := false
-    (* Catch other unexpected errors *)
-    | Sys_error msg -> printf "System Error: %s\n%!" msg; continue := false
-    | exn -> printf "Unexpected REPL Error: %s\n%!" (Exn.to_string exn); continue := false
+     (* End_of_file is the expected way to exit the loop when stdin closes *)
+     | End_of_file -> continue := false
+     (* Catch other unexpected errors *)
+     | Sys_error msg -> printf "System Error: %s\n%!" msg; continue := false
+     | exn -> printf "Unexpected REPL Error: %s\n%!" (Exn.to_string exn); continue := false
   done;
-  printf "Exiting Scaml REPL.\n%!"
+  printf "\nExiting Scaml REPL.\n%!"
 
 
 let () =
   (* ***** REGISTER BUILTIN IMPLEMENTATIONS ***** *)
+  (* Register the adapted implementations that take Value.t list *)
   Runtime.register_compile_impl scaml_compile_impl;
   Runtime.register_interpret_impl scaml_interpret_impl;
   (* ******************************************** *)
 
   (* Run the REPL *)
   run_repl ()
-

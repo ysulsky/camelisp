@@ -11,17 +11,19 @@ depends: [
   "ocaml" {>= "4.14.0"}
   "dune" {>= "3.18" & >= "3.11"}
   "base"
-  "core" {>= "v0.15.0"}
-  "core_unix" {>= "v0.15.0"}
-  "sexplib" {>= "v0.15.0"}
-  "ppx_sexp_conv" {>= "v0.15.0"}
-  "ppx_inline_test" {>= "v0.15.0"}
-  "ppx_compare" {>= "v0.15.0"}
-  "ppx_let" {>= "v0.15.0"}
+  "core"
+  "core_unix"
+  "sexplib"
+  "ppx_sexp_conv"
+  "ppx_inline_test"
+  "ppx_compare"
+  "ppx_let"
   "fmt"
-  "alcotest" {>= "1.7.0"}
+  "alcotest"
   "dynlink"
   "unix"
+  "menhir"
+  "menhirLib"
   "odoc" {with-doc}
 ]
 build: [
