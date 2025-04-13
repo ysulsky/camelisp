@@ -1,6 +1,5 @@
 (* scaml/lib/parse.ml *)
 open Lexing
-open Value (* Use Value.t *)
 
 exception SyntaxError of string
 
@@ -13,7 +12,7 @@ let from_lexbuf (lexbuf : Lexing.lexbuf) : (Value.t, string) result =
     Ok result
   with
   | SyntaxError msg -> Error msg (* Custom syntax error from parser actions if needed *)
-  | Failure msg when String.is_prefix msg ~prefix:"Lexer error:" -> (* Catch known lexer errors *)
+  | Failure msg when String.starts_with msg ~prefix:"Lexer error:" -> (* Catch known lexer errors *)
       let pos = lexbuf.lex_curr_p in
       Error (Printf.sprintf "Lexer error in '%s' at line %d, column %d: %s"
                pos.pos_fname pos.pos_lnum (pos.pos_cnum - pos.pos_bol + 1) msg)
@@ -23,7 +22,7 @@ let from_lexbuf (lexbuf : Lexing.lexbuf) : (Value.t, string) result =
                pos.pos_fname (Lexing.lexeme lexbuf) pos.pos_lnum (pos.pos_cnum - pos.pos_bol + 1))
   | e -> (* Catch other potential errors *)
       Error (Printf.sprintf "An unexpected error occurred during parsing: %s\n%s"
-               (Exn.to_string e) (Printexc.get_backtrace ()))
+               (Printexc.to_string e) (Printexc.get_backtrace ()))
 
 (* Function to parse a string *)
 let from_string ?(filename="<string>") (s : string) : (Value.t, string) result =
@@ -44,9 +43,9 @@ let from_channel ?(filename="<channel>") (ic : in_channel) : (Value.t, string) r
 let multiple_from_string ?(filename="<string>") (s : string) : (Value.t list, string) result =
   let lexbuf = Lexing.from_string s in
   lexbuf.lex_curr_p <- { lexbuf.lex_curr_p with pos_fname = filename };
-  let results = ref [] in
+  let results = ref (Ok []) in
   let continue = ref true in
-  while !continue do
+  while (Result.is_ok !results) && !continue do
       (* Attempt to skip whitespace/comments before next expression *)
       begin try
           while true do
@@ -65,8 +64,7 @@ let multiple_from_string ?(filename="<string>") (s : string) : (Value.t list, st
           continue := false (* Reached end of string *)
       else
           match from_lexbuf lexbuf with
-          | Ok value -> results := value :: !results
-          | Error msg -> results := []; continue := false; (* Clear results on error *)
-                            return (Error msg) (* Return error immediately *)
+          | Ok value -> results := Ok (value :: Result.get_ok !results)
+          | Error msg -> results := (Error msg)
   done;
-  Ok (List.rev !results)
+  Result.map List.rev !results

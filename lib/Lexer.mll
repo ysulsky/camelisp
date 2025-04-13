@@ -1,812 +1,158 @@
-    (* scaml/lib/lexer.mll *)
-    {
-    open Parser (* Needed to access the token type defined in parser.mly *)
-    open Lexing
-    (* Use Value directly *)
+(* scaml/lib/lexer.mll *)
+{
+open Parser (* Needed to access the token type defined in parser.mly *)
+(* Use Value directly *)
 
-    (* Helper to handle character escapes - Adapted for Elisp common escapes *)
-    let char_from_escape s =
-      if String.length s = 1 then
-        s.[0]
-      else (* Starts with \ *)
-        match s.[1] with
-        | 'n' -> '\n'
-        | 't' -> '\t'
-        | 'r' -> '\r'
-        | 'b' -> '\b'
-        | 'f' -> '\012' (* Form feed *)
-        | 'v' -> '\013' (* Vertical tab *)
-        | '\\' -> '\\'
-        | '"' -> '"' (* Needed for within strings *)
-        | 's' -> ' ' (* Common Lisp space, Emacs might use just space *)
-        | '0'..='7' ->
-            (* Handle octal escape up to 3 digits, e.g. \177 *)
-            let code = ref 0 in
-            let len = min (String.length s) 4 in (* \ plus up to 3 digits *)
-            for i = 1 to len - 1 do
-              if s.[i] >= '0' && s.[i] <= '7' then
-                code := (!code * 8) + (Char.code s.[i] - Char.code '0')
-              else
-                raise (Failure ("Invalid octal escape sequence in char: " ^ s))
+(* Helper to handle character escapes - Adapted for Elisp common escapes *)
+let char_from_escape s =
+  if String.length s = 1 then
+    s.[0]
+  else (* Starts with \ *)
+    match s.[1] with
+    | 'n' -> '\n'
+    | 't' -> '\t'
+    | 'r' -> '\r'
+    | 'b' -> '\b'
+    | 'f' -> '\012' (* Form feed *)
+    | 'v' -> '\013' (* Vertical tab *)
+    | '\\' -> '\\'
+    | '"' -> '"' (* Needed for within strings *)
+    | 's' -> ' ' (* Common Lisp space, Emacs might use just space *)
+    | '0'..'7' ->
+        (* Handle octal escape up to 3 digits, e.g. \177 *)
+        let code = ref 0 in
+        let len = min (String.length s) 4 in (* \ plus up to 3 digits *)
+        for i = 1 to len - 1 do
+          if s.[i] >= '0' && s.[i] <= '7' then
+            code := (!code * 8) + (Char.code s.[i] - Char.code '0')
+          else
+            raise (Failure ("Invalid octal escape sequence in char: " ^ s))
+        done;
+        if !code > 255 then raise (Failure ("Invalid octal escape code (too large) in char: " ^ s));
+        Char.chr !code
+    (* Add more Emacs-specific escapes if needed: \C-x, \M-x etc. *)
+    | _ -> s.[1] (* Treat \c as just c if not a special escape *)
+
+let string_buffer = Buffer.create 1024
+
+let unescape_string s =
+  Buffer.clear string_buffer;
+  let i = ref 0 in
+  let len = String.length s in
+  while !i < len do
+    if s.[!i] = '\\' && !i + 1 < len then begin
+      let escaped_char =
+        match s.[!i+1] with
+        | 'n' -> '\n' | 't' -> '\t' | 'r' -> '\r' | 'b' -> '\b'
+        | 'f' -> '\012' | 'v' -> '\013'
+        | '\\' -> '\\' | '"' -> '"'
+        | '0'..'7' ->
+            let start_oct = !i + 1 in
+            let end_oct = ref start_oct in
+            while !end_oct + 1 < len && !end_oct + 1 < start_oct + 3 && s.[!end_oct + 1] >= '0' && s.[!end_oct + 1] <= '7' do
+              incr end_oct
             done;
-            if !code > 255 then raise (Failure ("Invalid octal escape code (too large) in char: " ^ s));
-            Char.chr !code
-        (* Add more Emacs-specific escapes if needed: \C-x, \M-x etc. *)
-        | _ -> s.[1] (* Treat \c as just c if not a special escape *)
+            let oct_str = String.sub s start_oct (!end_oct - start_oct + 1) in
+            let code = int_of_string ("0o" ^ oct_str) in
+             if code > 255 then raise (Failure ("Invalid octal escape code (too large) in string: \\" ^ oct_str));
+             i := !end_oct; (* Advance i past the octal digits *)
+             Char.chr code
+        (* Add \xNN, \uNNNN, \UNNNNNNNN if needed *)
+        | c -> c (* Unknown escape: treat as literal character *)
+      in
+      Buffer.add_char string_buffer escaped_char;
+      i := !i + 1 (* Already incremented i if needed (e.g., octal) *)
+    end else begin
+      Buffer.add_char string_buffer s.[!i];
+    end;
+    incr i
+  done;
+  Buffer.contents string_buffer
 
-    let string_buffer = Buffer.create 1024
+}
 
-    let unescape_string s =
-      Buffer.clear string_buffer;
-      let i = ref 0 in
-      let len = String.length s in
-      while !i < len do
-        if s.[!i] = '\\' && !i + 1 < len then begin
-          let escaped_char =
-            match s.[!i+1] with
-            | 'n' -> '\n' | 't' -> '\t' | 'r' -> '\r' | 'b' -> '\b'
-            | 'f' -> '\012' | 'v' -> '\013'
-            | '\\' -> '\\' | '"' -> '"'
-            | '0'..='7' ->
-                let start_oct = !i + 1 in
-                let end_oct = ref start_oct in
-                while !end_oct + 1 < len && !end_oct + 1 < start_oct + 3 && s.[!end_oct + 1] >= '0' && s.[!end_oct + 1] <= '7' do
-                  incr end_oct
-                done;
-                let oct_str = String.sub s start_oct (!end_oct - start_oct + 1) in
-                let code = int_of_string ("0o" ^ oct_str) in
-                 if code > 255 then raise (Failure ("Invalid octal escape code (too large) in string: \\" ^ oct_str));
-                 i := !end_oct; (* Advance i past the octal digits *)
-                 Char.chr code
-            (* Add \xNN, \uNNNN, \UNNNNNNNN if needed *)
-            | c -> c (* Unknown escape: treat as literal character *)
-          in
-          Buffer.add_char string_buffer escaped_char;
-          i := !i + 1 (* Already incremented i if needed (e.g., octal) *)
-        end else begin
-          Buffer.add_char string_buffer s.[!i];
-        end;
-        incr i
-      done;
-      Buffer.contents string_buffer
+(* Define regexps for tokens *)
+let digit = ['0'-'9']
+let frac = '.' digit+
+let exp = ['e' 'E'] ['-' '+']? digit+
+let float_lit = ['-' '+']? (digit+ (frac exp? | exp) | frac exp?) (* Basic float *)
+let int_lit = ['-' '+']? digit+
+(* Add hex/octal/binary number literals if needed, e.g., #x... #o... #b... *)
 
+(* Elisp symbols can contain almost anything not otherwise interpreted *)
+(* More precise symbol def (avoid starting like numbers): *)
+let initial_symbol_char = ['a'-'z' 'A'-'Z' '*' '+' '/' '<' '=' '>' '?' '!' '_' '$' '%' '&' '~' '^' '-'] (* Simplified *)
+let subsequent_symbol_char = initial_symbol_char | digit | '.' | ':' (* Use | or list chars directly *)
+let symbol_refined_lit = initial_symbol_char subsequent_symbol_char* (* Removed trailing | '+' | '-' *)
+
+
+let keyword_lit = ':' subsequent_symbol_char+ (* Use subsequent for keywords *)
+
+(* Elisp Character literals: ? followed by char or \escape sequence *)
+let char_simple = [^ '\\'] (* Any char except backslash *)
+let char_escape = '\\' ([ 'n' 't' 'r' 'b' 'f' 'v' '\\' '"' 's' ] | ['0'-'7'] ['0'-'7']? ['0'-'7']? | _ ) (* Use _ for any char *)
+let char_lit = '?' (char_simple | char_escape)
+
+
+rule token = parse
+  | [' ' '\t' '\n' '\r']+ { token lexbuf } (* Skip whitespace *)
+  | ';' [^'\n']* ('\n'|eof) { token lexbuf } (* Skip comments to EOL *)
+  | "#|"           { comment (1) lexbuf }    (* Nested block comment start *)
+
+  (* Delimiters and reader macros *)
+  | '('            { LPAREN }
+  | ')'            { RPAREN }
+  | '['            { LBRACKET }
+  | ']'            { RBRACKET }
+  | '.'            { DOT }
+  | '\''           { QUOTE }
+  | '`'            { BACKQUOTE }
+  | ','            { COMMA }
+  | ",@"           { COMMA_AT }
+  | "#'"           { HASH_QUOTE }
+
+  (* Atoms *)
+  | "nil"          { NIL_TOKEN } (* Distinguish 'nil' symbol from empty list '()' *)
+  | "t"            { T_TOKEN }
+  | int_lit as lxm {
+      try INT (int_of_string lxm)
+      with _ -> SYMBOL lxm (* If it looks like an int but fails, treat as symbol *)
     }
-
-    (* Define regexps for tokens *)
-    let digit = ['0'-'9']
-    let frac = '.' digit+
-    let exp = ['e' 'E'] ['-' '+']? digit+
-    let float_lit = ['-' '+']? (digit+ (frac exp? | exp) | frac exp?) (* Basic float *)
-    let int_lit = ['-' '+']? digit+
-    (* Add hex/octal/binary number literals if needed, e.g., #x... #o... #b... *)
-
-    (* Elisp symbols can contain almost anything not otherwise interpreted *)
-    (* More precise symbol def (avoid starting like numbers): *)
-    let initial_symbol_char = ['a'-'z' 'A'-'Z' '*' '+' '/' '<' '=' '>' '?' '!' '_' '$' '%' '&' '~' '^' '-'] (* Simplified *)
-    let subsequent_symbol_char = initial_symbol_char | digit | '.' | ':' (* Use | or list chars directly *)
-    (* ***** FIX HERE ***** *)
-    let symbol_refined_lit = initial_symbol_char subsequent_symbol_char* | '+' | '-' (* Use | for single chars *)
-
-
-    let keyword_lit = ':' subsequent_symbol_char+ (* Use subsequent for keywords *)
-
-    (* Elisp Character literals: ? followed by char or \escape sequence *)
-    let char_simple = [^ '\\'] (* Any char except backslash *)
-    let char_escape = '\\' ([ 'n' 't' 'r' 'b' 'f' 'v' '\\' '"' 's' ] | ['0'-'7'] ['0'-'7']? ['0'-'7']? | [^]) (* Add \C- \M- etc. if needed *)
-    let char_lit = '?' (char_simple | char_escape)
-
-
-    rule token = parse
-      | [' ' '\t' '\n' '\r']+ { token lexbuf } (* Skip whitespace *)
-      | ';' [^'\n']* ('\n'|eof) { token lexbuf } (* Skip comments to EOL *)
-      | "#|"           { comment (1) lexbuf }    (* Nested block comment start *)
-
-      (* Delimiters and reader macros *)
-      | '('            { LPAREN }
-      | ')'            { RPAREN }
-      | '['            { LBRACKET }
-      | ']'            { RBRACKET }
-      | '.'            { DOT }
-      | '\''           { QUOTE }
-      | '`'            { BACKQUOTE }
-      | ','            { COMMA }
-      | ",@"           { COMMA_AT }
-      | "#'"           { HASH_QUOTE }
-
-      (* Atoms *)
-      | "nil"          { NIL_TOKEN } (* Distinguish 'nil' symbol from empty list '()' *)
-      | "t"            { T_TOKEN }
-      | int_lit as lxm {
-          try INT (int_of_string lxm)
-          with _ -> SYMBOL lxm (* If it looks like an int but fails, treat as symbol *)
-        }
-      | float_lit as lxm {
-          try FLOAT (float_of_string lxm)
-          with _ -> SYMBOL lxm (* If it looks like a float but fails, treat as symbol *)
-        }
-      | '"' ([^ '"' '\\'] | '\\'.)* '"' as lxm {
-          (* Remove quotes and unescape content *)
-          let content = String.sub lxm 1 (String.length lxm - 2) in
-          STRING (unescape_string content)
-        }
-      | keyword_lit as lxm { KEYWORD (String.sub lxm 1 (String.length lxm - 1)) } (* Remove leading ':' *)
-      | char_lit as lxm {
-          let char_part = String.sub lxm 1 (String.length lxm - 1) in
-          CHAR (char_from_escape char_part)
-         }
-       (* Important: Symbol must be tried *after* keywords, numbers, nil, t *)
-      | symbol_refined_lit as lxm { SYMBOL lxm }
-
-      (* End of file *)
-      | eof            { EOF }
-
-      (* Error *)
-      | _ as c         { raise (Failure (Printf.sprintf "Lexer error: Unexpected character '%c' at position %d"
-                                          c (Lexing.lexeme_start lexbuf))) }
-
-    (* Rule for nested block comments *)
-    and comment level = parse
-      | "#|"           { comment (level + 1) lexbuf }
-      | "|#"           { if level = 1 then token lexbuf else comment (level - 1) lexbuf }
-      | eof            { raise (Failure "Unterminated block comment") }
-      | [^ '#' '|']+   { comment level lexbuf } (* Consume chars efficiently *)
-      | '#'            { (* Buffer.add_char Lexing.current_buffer '#'; *) comment level lexbuf } (* Consume '#' not part of delimiters *)
-      | '|'            { (* Buffer.add_char Lexing.current_buffer '|'; *) comment level lexbuf } (* Consume '|' not part of delimiters *)
-      | _              { comment level lexbuf } (* Consume single character *)
-
-
-    {
+  | float_lit as lxm {
+      try FLOAT (float_of_string lxm)
+      with _ -> SYMBOL lxm (* If it looks like a float but fails, treat as symbol *)
     }
-    ```
+  (* ***** FIX HERE ***** *)
+  | '"' ([^ '"' '\\'] | '\\' _)* '"' as lxm { (* Use '\\' _ to match escaped char *)
+      (* Remove quotes and unescape content *)
+      let content = String.sub lxm 1 (String.length lxm - 2) in
+      STRING (unescape_string content)
+    }
+  | keyword_lit as lxm { KEYWORD (String.sub lxm 1 (String.length lxm - 1)) } (* Remove leading ':' *)
+  | char_lit as lxm {
+      let char_part = String.sub lxm 1 (String.length lxm - 1) in
+      CHAR (char_from_escape char_part)
+     }
+   (* Important: Symbol must be tried *after* keywords, numbers, nil, t *)
+  | symbol_refined_lit as lxm { SYMBOL lxm }
 
-2.  **`Analyze.ml` & `Interpreter.ml` Syntax Errors:**
-    * **Errors:** Syntax errors related to unmatched `{` and expected `}` in both files (Analyze line 129, Interpreter line 149).
-    * **Cause:** These seem to be the *same* pattern matching syntax errors we corrected in the previous step. It looks like the fixes might not have been applied correctly to your local files, or you might be looking at an older version of the code I sent. The pattern `ref (Value.Symbol {name})` is invalid.
-    * **Fix:** I'll provide the corrected code blocks for the relevant functions again. Please ensure you replace the existing functions in your `Analyze.ml` and `Interpreter.ml` files with these versions *exactly*.
+  (* End of file *)
+  | eof            { EOF }
 
-    
-    ```ocaml
-    (* Analyze.ml - Static Type Analysis (Refactored for Value.t - PARTIAL) *)
-    (* !! WARNING: This is a complex refactoring. This is a partial attempt !! *)
-    (* !!          and likely contains errors or omissions.              !! *)
+  (* Error *)
+  | _ as c         { raise (Failure (Printf.sprintf "Lexer error: Unexpected character '%c' at position %d"
+                                      c (Lexing.lexeme_start lexbuf))) }
 
-    open! Core
-    (* REMOVED: open! Sexplib.Std *)
-
-    (* Use types/modules from the Scaml library *)
-    module Value = Value
-    module InferredType = InferredType
-    (* REMOVED: module Runtime = Runtime *)
-
-    (* --- Typed Abstract Syntax Tree (TAST) --- *)
-    (* TAST definition remains the same *)
-    module TypedAst = struct
-      type t =
-        | Atom of { value: Value.t; inferred_type: InferredType.t } (* Store Value.t atom *)
-        | Quote of { value: Value.t; inferred_type: InferredType.t } (* Store quoted Value.t *)
-        | If of {
-            cond: t;
-            then_branch: t;
-            else_branch: t option;
-            inferred_type: InferredType.t
-          }
-        | Progn of { forms: t list; inferred_type: InferredType.t }
-        | Let of {
-            bindings: (string * t) list; (* Initializer is TAST *)
-            body: t list;
-            inferred_type: InferredType.t
-          }
-        | LetStar of {
-            bindings: (string * t) list;
-            body: t list;
-            inferred_type: InferredType.t
-          }
-        | Setq of { pairs: (string * t) list; inferred_type: InferredType.t } (* Value is TAST *)
-        | Lambda of {
-            args: InferredType.arg_spec; (* Parsed arg spec *)
-            body: t list; (* Analyzed body *)
-            inferred_type: InferredType.t (* Function type *)
-          }
-        | Defun of {
-            name: string;
-            args: InferredType.arg_spec;
-            body: t list;
-            fun_type: InferredType.t; (* Type of the function itself *)
-            inferred_type: InferredType.t (* Type of the defun expression (symbol) *)
-          }
-        | Cond of { clauses: (t * t list) list; inferred_type: InferredType.t }
-        | Funcall of { func: t; args: t list; inferred_type: InferredType.t }
-      (* REMOVED: [@@deriving sexp_of] - Requires manual definition now *)
-
-      (* Manual sexp_of_t for TypedAst.t *)
-      let rec sexp_of_t (node : t) : Sexp.t =
-        match node with
-        | Atom { value; inferred_type } ->
-            Sexp.List [Sexp.Atom "Atom"; Value.sexp_of_t value; InferredType.sexp_of_t inferred_type]
-        | Quote { value; inferred_type } ->
-            Sexp.List [Sexp.Atom "Quote"; Value.sexp_of_t value; InferredType.sexp_of_t inferred_type]
-        | If { cond; then_branch; else_branch; inferred_type } ->
-            Sexp.List [Sexp.Atom "If"; sexp_of_t cond; sexp_of_t then_branch;
-                       Option.value_map else_branch ~default:(Sexp.Atom "None") ~f:(fun e -> Sexp.List [Sexp.Atom "Some"; sexp_of_t e]);
-                       InferredType.sexp_of_t inferred_type]
-        | Progn { forms; inferred_type } ->
-            Sexp.List [Sexp.Atom "Progn"; Sexp.List (List.map forms ~f:sexp_of_t); InferredType.sexp_of_t inferred_type]
-        | Let { bindings; body; inferred_type } ->
-            let sexp_of_binding (n, t) = Sexp.List [Sexp.Atom n; sexp_of_t t] in
-            Sexp.List [Sexp.Atom "Let"; Sexp.List (List.map bindings ~f:sexp_of_binding);
-                       Sexp.List (List.map body ~f:sexp_of_t); InferredType.sexp_of_t inferred_type]
-        | LetStar { bindings; body; inferred_type } ->
-             let sexp_of_binding (n, t) = Sexp.List [Sexp.Atom n; sexp_of_t t] in
-             Sexp.List [Sexp.Atom "LetStar"; Sexp.List (List.map bindings ~f:sexp_of_binding);
-                       Sexp.List (List.map body ~f:sexp_of_t); InferredType.sexp_of_t inferred_type]
-        | Setq { pairs; inferred_type } ->
-             let sexp_of_pair (n, t) = Sexp.List [Sexp.Atom n; sexp_of_t t] in
-             Sexp.List [Sexp.Atom "Setq"; Sexp.List (List.map pairs ~f:sexp_of_pair); InferredType.sexp_of_t inferred_type]
-        | Lambda { args; body; inferred_type } ->
-            Sexp.List [Sexp.Atom "Lambda"; InferredType.sexp_of_arg_spec args;
-                       Sexp.List (List.map body ~f:sexp_of_t); InferredType.sexp_of_t inferred_type]
-        | Defun { name; args; body; fun_type; inferred_type } ->
-            Sexp.List [Sexp.Atom "Defun"; Sexp.Atom name; InferredType.sexp_of_arg_spec args;
-                       Sexp.List (List.map body ~f:sexp_of_t); InferredType.sexp_of_t fun_type; InferredType.sexp_of_t inferred_type]
-        | Cond { clauses; inferred_type } ->
-            let sexp_of_clause (tst, bdy) = Sexp.List [sexp_of_t tst; Sexp.List (List.map bdy ~f:sexp_of_t)] in
-            Sexp.List [Sexp.Atom "Cond"; Sexp.List (List.map clauses ~f:sexp_of_clause); InferredType.sexp_of_t inferred_type]
-        | Funcall { func; args; inferred_type } ->
-            Sexp.List [Sexp.Atom "Funcall"; sexp_of_t func; Sexp.List (List.map args ~f:sexp_of_t); InferredType.sexp_of_t inferred_type]
+(* Rule for nested block comments *)
+and comment level = parse
+  | "#|"           { comment (level + 1) lexbuf }
+  | "|#"           { if level = 1 then token lexbuf else comment (level - 1) lexbuf }
+  | eof            { raise (Failure "Unterminated block comment") }
+  | [^ '#' '|']+   { comment level lexbuf } (* Consume chars efficiently *)
+  | '#'            { (* Buffer.add_char Lexing.current_buffer '#'; *) comment level lexbuf } (* Consume '#' not part of delimiters *)
+  | '|'            { (* Buffer.add_char Lexing.current_buffer '|'; *) comment level lexbuf } (* Consume '|' not part of delimiters *)
+  | _              { comment level lexbuf } (* Consume single character *)
 
 
-      (* Function to extract the inferred type from any TAST node *)
-      let get_type (node : t) : InferredType.t =
-        match node with
-        | Atom { inferred_type=t; _ } -> t | Quote { inferred_type=t; _ } -> t
-        | If { inferred_type=t; _ } -> t | Progn { inferred_type=t; _ } -> t
-        | Let { inferred_type=t; _ } -> t | LetStar { inferred_type=t; _ } -> t
-        | Setq { inferred_type=t; _ } -> t | Lambda { inferred_type=t; _ } -> t
-        | Defun { inferred_type=t; _ } -> t | Cond { inferred_type=t; _ } -> t
-        | Funcall { inferred_type=t; _ } -> t
-    end
-
-    (* --- Argument List Parsing (from Value.t) --- *)
-    module ArgListParser = struct
-      type arg_spec = InferredType.arg_spec = {
-        required: string list;
-        optional: (string * Value.t option) list; (* Store Value.t for default *)
-        rest: string option;
-      } [@@deriving sexp_of] (* Keep sexp_of for debugging *)
-
-      let parse (arg_list_val : Value.t) : arg_spec =
-        match Value.value_to_list_opt arg_list_val with
-        | Some arg_list ->
-            let rec parse_internal state rev_required rev_optional rest_opt ast =
-              match state, ast with
-              (* Keywords *)
-              | _, Value.Symbol {name="&optional"} :: rest_ast ->
-                  parse_internal `Optional rev_required rev_optional rest_opt rest_ast
-              | _, Value.Symbol {name="&rest"} :: rest_ast ->
-                  parse_internal `Rest rev_required rev_optional rest_opt rest_ast
-
-              (* Required *)
-              | `Required, Value.Symbol {name} :: rest_ast ->
-                  parse_internal `Required (name :: rev_required) rev_optional rest_opt rest_ast
-              | `Required, [] -> { required = List.rev rev_required; optional = []; rest = None }
-
-              (* Optional *)
-              | `Optional, Value.Symbol {name} :: rest_ast -> (* Optional without default *)
-                  parse_internal `Optional rev_required ((name, None) :: rev_optional) rest_opt rest_ast
-              (* ***** CORRECT PATTERN HERE ***** *)
-              | `Optional, Value.Cons { car = ref (Value.Symbol { name = opt_name }); cdr = ref default_list_val } :: rest_ast -> (* Optional with default *)
-                  (match Value.value_to_list_opt default_list_val with
-                   | Some [default_form] ->
-                       parse_internal `Optional rev_required ((opt_name, Some default_form) :: rev_optional) rest_opt rest_ast
-                   | _ -> failwithf "Malformed optional arg with default: %s" (!Value.to_string (Value.Cons { car = ref (Value.Symbol {name=opt_name}); cdr = ref default_list_val })) ())
-              | `Optional, [] -> { required = List.rev rev_required; optional = List.rev rev_optional; rest = None }
-
-              (* Rest *)
-              | `Rest, Value.Symbol {name} :: [] -> (* &rest followed by one symbol *)
-                  { required = List.rev rev_required; optional = List.rev rev_optional; rest = Some name }
-              | `Rest, _ -> failwith "Malformed &rest argument: must be followed by exactly one symbol"
-
-              (* Errors *)
-              | _, other :: _ -> failwithf "Invalid element in lambda list: %s" (!Value.to_string other) ()
-            in
-            parse_internal `Required [] [] None arg_list
-        | None -> failwith "Lambda list must be a proper list"
-    end
-
-
-    (* --- Analysis Environment --- *)
-    type analysis_env = (string * InferredType.t) list [@@deriving sexp_of]
-    let add_binding env name inferred_type = (name, inferred_type) :: env
-    let add_bindings env bindings = bindings @ env
-
-    (* --- Unification & Type Variables (Keep as is) --- *)
-    module Subst = String.Map
-    type substitution = InferredType.t Subst.t [@@deriving sexp_of]
-    exception Unification_error of string
-    let rec apply_subst subst t = (* ... keep existing implementation ... *) InferredType.(
-        match t with
-        | T_Var v -> (match Map.find subst v with Some bound_t -> apply_subst subst bound_t | None -> t)
-        | T_Cons info -> T_Cons { car_type = apply_subst subst info.car_type; cdr_type = apply_subst subst info.cdr_type }
-        | T_Vector info -> T_Vector { element_type = apply_subst subst info.element_type }
-        | T_Function info -> T_Function { arg_types = Option.map info.arg_types ~f:(List.map ~f:(apply_subst subst)); return_type = apply_subst subst info.return_type }
-        | T_Union s -> normalize_union_set (InferredTypeSet.map s ~f:(apply_subst subst))
-        | T_Unknown | T_Any | T_Nil | T_Bool | T_Int | T_Float | T_Char | T_String | T_Symbol | T_Keyword as other -> other
-        )
-    let compose_subst s1 s2 = (* ... keep existing implementation ... *)
-        let s2_mapped = Subst.map s2 ~f:(apply_subst s1) in
-        Map.merge_skewed s1 s2_mapped ~combine:(fun ~key:_ v1 _ -> v1)
-    let rec occurs_check var_name t = (* ... keep existing implementation ... *) InferredType.(
-        match t with
-        | T_Var v -> String.equal v var_name
-        | T_Cons { car_type; cdr_type } -> occurs_check var_name car_type || occurs_check var_name cdr_type
-        | T_Vector { element_type } -> occurs_check var_name element_type
-        | T_Function { arg_types; return_type } -> (Option.value_map arg_types ~default:false ~f:(List.exists ~f:(occurs_check var_name))) || occurs_check var_name return_type
-        | T_Union s -> Set.exists s ~f:(occurs_check var_name)
-        | T_Unknown | T_Any | T_Nil | T_Bool | T_Int | T_Float | T_Char | T_String | T_Symbol | T_Keyword -> false
-        )
-    let rec unify t1 t2 = (* ... keep existing implementation ... *)
-        if [%compare.equal: InferredType.t] t1 t2 then Subst.empty
-        else match (t1, t2) with
-        | (InferredType.T_Var v, t) | (t, InferredType.T_Var v) -> unify_var v t
-        | (InferredType.T_Cons c1, InferredType.T_Cons c2) -> unify_cons c1 c2
-        | (InferredType.T_Vector v1, InferredType.T_Vector v2) -> unify_vector v1 v2
-        | (InferredType.T_Function f1, InferredType.T_Function f2) -> unify_fun f1 f2
-        | (InferredType.T_Union _, InferredType.T_Union _) -> Subst.empty
-        | (InferredType.T_Union _, _) | (_, InferredType.T_Union _) -> Subst.empty
-        | (InferredType.T_Any, _) | (_, InferredType.T_Any) -> Subst.empty
-        | (InferredType.T_Unknown, _) | (_, InferredType.T_Unknown) -> Subst.empty
-        | _ -> let msg = sprintf "Cannot unify different concrete types: %s / %s" (InferredType.to_string t1) (InferredType.to_string t2) in raise (Unification_error msg)
-    and unify_var var_name t = (* ... keep existing implementation ... *)
-        match t with
-        | InferredType.T_Var v when String.equal v var_name -> Subst.empty
-        | InferredType.T_Any | InferredType.T_Unknown -> Subst.empty
-        | _ -> if occurs_check var_name t then let msg = sprintf "Recursive type error: %s occurs in %s" var_name (InferredType.to_string t) in raise (Unification_error msg) else Subst.singleton var_name t
-    and unify_cons c1 c2 = (* ... keep existing implementation ... *)
-        let s1 = unify c1.InferredType.car_type c2.InferredType.car_type in
-        let s2 = unify (apply_subst s1 c1.InferredType.cdr_type) (apply_subst s1 c2.InferredType.cdr_type) in
-        compose_subst s1 s2
-    and unify_vector v1 v2 = (* ... keep existing implementation ... *)
-        unify v1.InferredType.element_type v2.InferredType.element_type
-    and unify_fun f1 f2 = (* ... keep existing implementation ... *)
-        let s1 = unify f1.InferredType.return_type f2.InferredType.return_type in
-        match (f1.InferredType.arg_types, f2.InferredType.arg_types) with
-        | (Some args1, Some args2) -> if List.length args1 <> List.length args2 then raise (Unification_error "Function types have different arity") else List.fold2_exn args1 args2 ~init:s1 ~f:(fun current_subst arg1 arg2 -> let s_arg = unify (apply_subst current_subst arg1) (apply_subst current_subst arg2) in compose_subst current_subst s_arg)
-        | (None, None) -> s1 | (Some _, None) | (None, Some _) -> s1
-
-    (* --- Type Variable Instantiation (Keep as is) --- *)
-    let type_var_instantiation_counter = ref 0
-    let generate_fresh_type_var () = (* ... keep existing implementation ... *)
-        incr type_var_instantiation_counter; InferredType.T_Var (sprintf "a%d" !type_var_instantiation_counter)
-    let instantiate_type t = (* ... keep existing implementation ... *)
-        let subst_ref = ref Subst.empty in
-        let rec inst ty = InferredType.(match ty with
-            | T_Var v -> (match Map.find !subst_ref v with Some fresh_var -> fresh_var | None -> let fresh_var = generate_fresh_type_var() in subst_ref := Map.add_exn !subst_ref ~key:v ~data:fresh_var; fresh_var)
-            | T_Cons info -> T_Cons { car_type = inst info.car_type; cdr_type = inst info.cdr_type }
-            | T_Vector info -> T_Vector { element_type = inst info.element_type }
-            | T_Function info -> T_Function { arg_types = Option.map info.arg_types ~f:(List.map ~f:inst); return_type = inst info.return_type }
-            | T_Union s -> normalize_union_set (InferredTypeSet.map s ~f:inst)
-            | T_Unknown | T_Any | T_Nil | T_Bool | T_Int | T_Float | T_Char | T_String | T_Symbol | T_Keyword as other -> other)
-        in (inst t, !subst_ref)
-    let instantiate_fun_sig finfo = (* ... keep existing implementation ... *)
-        let temp_fun_type = InferredType.T_Function finfo in
-        let instantiated_type, _ = instantiate_type temp_fun_type in
-        match instantiated_type with InferredType.T_Function finfo_inst -> (finfo_inst.arg_types, finfo_inst.return_type) | _ -> failwith "Internal error"
-
-
-    (* --- Analysis of Quoted Data (from Value.t) --- *)
-    (* Determine the InferredType of a quoted Value.t *)
-    let rec type_of_quoted_data (value : Value.t) : InferredType.t =
-      let open InferredType in
-      match value with
-      | Value.Nil -> T_Nil
-      | Value.T -> T_Bool (* Treat 't' as Bool in quotes *)
-      | Value.Int _ -> T_Int
-      | Value.Float _ -> T_Float
-      | Value.String _ -> T_String
-      | Value.Symbol _ -> T_Symbol
-      | Value.Keyword _ -> T_Keyword
-      | Value.Char _ -> T_Char
-      | Value.Vector arr ->
-          (* Infer vector type based on elements - simplified: union of element types *)
-          let element_types = Array.map arr ~f:type_of_quoted_data |> Array.to_list in
-          let union_type = List.fold element_types ~init:T_Nil ~f:type_union in
-          T_Vector { element_type = union_type }
-      | Value.Cons { car; cdr } ->
-          (* Recursively determine car and cdr types *)
-          let car_t = type_of_quoted_data !car in
-          let cdr_t = type_of_quoted_data !cdr in
-          T_Cons { car_type = car_t; cdr_type = cdr_t }
-      | Value.Function _ | Value.Builtin _ -> T_Function { arg_types=None; return_type=T_Any } (* Quoted functions are opaque *)
-
-
-    (* --- Built-in Function Type Signatures (Keep as is) --- *)
-    let tvar_a = InferredType.T_Var "a"
-    let tvar_b = InferredType.T_Var "b"
-    let get_builtin_signature name = (* ... keep existing implementation ... *)
-        let open InferredType in
-        match name with
-        | "+" | "*" | "-" | "/" -> Some { arg_types = None; return_type = T_Int }
-        | "car" -> let input_type = type_union (T_Cons { car_type = tvar_a; cdr_type = T_Any }) T_Nil in Some { arg_types = Some [input_type]; return_type = type_union tvar_a T_Nil }
-        | "cdr" -> let input_type = type_union (T_Cons { car_type = T_Any; cdr_type = tvar_b }) T_Nil in Some { arg_types = Some [input_type]; return_type = type_union tvar_b T_Nil }
-        | "cons" -> Some { arg_types = Some [tvar_a; tvar_b]; return_type = T_Cons { car_type = tvar_a; cdr_type = tvar_b } }
-        | "integerp" | "stringp" | "symbolp" | "consp" | "listp" | "null" | "vectorp" | "floatp" | "keywordp" | "atom" | "functionp" -> Some { arg_types = Some [T_Any]; return_type = T_Bool }
-        | "eq" | "equal" -> Some { arg_types = Some [tvar_a; tvar_a]; return_type = T_Bool }
-        | "compile" | "interpret" | "assoc" | "list" | "setcar" | "setcdr" -> Some { arg_types = None; return_type = T_Any } (* Simplified *)
-        | _ -> None
-
-    (* --- Helper to analyze progn-like body --- *)
-    let rec analyze_progn_body env body_values
-        : TypedAst.t list * substitution * InferredType.t =
-      let typed_body, final_subst =
-        List.fold body_values ~init:([], Subst.empty)
-          ~f:(fun (acc_nodes, acc_subst) value ->
-            let current_env = List.map env ~f:(fun (name, ty) -> (name, apply_subst acc_subst ty)) in
-            let typed_node, node_subst = analyze_expr current_env value in (* Analyze Value.t *)
-            (acc_nodes @ [typed_node], compose_subst acc_subst node_subst)
-          )
-      in
-      let result_type = match List.last typed_body with
-        | None -> InferredType.T_Nil
-        | Some last -> apply_subst final_subst (TypedAst.get_type last)
-      in
-      (typed_body, final_subst, result_type)
-
-    (* --- Core Analysis Function (Input: Value.t, Output: TypedAst.t * Substitution) --- *)
-    and analyze_expr (env : analysis_env) (value : Value.t)
-        : TypedAst.t * substitution =
-      match value with
-      (* Atoms *)
-      | Value.Nil -> (TypedAst.Atom { value; inferred_type = T_Nil }, Subst.empty)
-      | Value.T -> (TypedAst.Atom { value; inferred_type = T_Bool }, Subst.empty)
-      | Value.Int _ -> (TypedAst.Atom { value; inferred_type = T_Int }, Subst.empty)
-      | Value.Float _ -> (TypedAst.Atom { value; inferred_type = T_Float }, Subst.empty)
-      | Value.String _ -> (TypedAst.Atom { value; inferred_type = T_String }, Subst.empty)
-      | Value.Keyword _ -> (TypedAst.Atom { value; inferred_type = T_Keyword }, Subst.empty)
-      | Value.Char _ -> (TypedAst.Atom { value; inferred_type = T_Char }, Subst.empty)
-      | Value.Vector _ -> (* Type vector based on elements? Simplified: Any *)
-          (TypedAst.Atom { value; inferred_type = T_Vector {element_type = T_Any} }, Subst.empty)
-      | Value.Function _ | Value.Builtin _ -> (* Opaque function types *)
-           (TypedAst.Atom { value; inferred_type = T_Function {arg_types=None; return_type=T_Any} }, Subst.empty)
-
-      | Value.Symbol {name} as atom_val ->
-          (* Look up symbol in environment *)
-          let inferred_t = match List.Assoc.find env name ~equal:String.equal with
-                           | Some t -> t
-                           | None -> T_Symbol (* Assume global or undefined *)
-          in
-          (TypedAst.Atom { value = atom_val; inferred_type = inferred_t }, Subst.empty)
-
-      (* Cons Cell: Potential special form or function call *)
-      | Value.Cons { car; cdr } ->
-          analyze_cons_cell env !car !cdr
-
-    (* Helper to analyze cons cells *)
-    and analyze_cons_cell env car_val cdr_val : TypedAst.t * substitution =
-        match car_val with
-        (* --- Special Forms --- *)
-        | Value.Symbol {name="quote"} ->
-            (match Value.value_to_list_opt cdr_val with
-             | Some [data] ->
-                 let inferred_type = type_of_quoted_data data in
-                 (TypedAst.Quote { value = data; inferred_type }, Subst.empty)
-             | _ -> failwith "Malformed quote: expected exactly one argument")
-
-        | Value.Symbol {name="if"} ->
-            (match Value.value_to_list_opt cdr_val with
-             | Some [c; t] -> analyze_if env c t None
-             | Some [c; t; e] -> analyze_if env c t (Some e)
-             | _ -> failwith "Malformed if: expected 2 or 3 arguments")
-
-        | Value.Symbol {name="progn"} ->
-            let body_values = Value.value_to_list_opt cdr_val |> Option.value ~default:[] in
-            let typed_forms, final_subst, result_type = analyze_progn_body env body_values in
-            (TypedAst.Progn { forms = typed_forms; inferred_type = result_type }, final_subst)
-
-        | Value.Symbol {name="let"} ->
-            (match Value.value_to_list_opt cdr_val with
-             | Some (bindings_val :: body_values) ->
-                 analyze_let env bindings_val body_values
-             | _ -> failwith "Malformed let: expected bindings list and body")
-
-        | Value.Symbol {name="let*"} ->
-            (match Value.value_to_list_opt cdr_val with
-             | Some (bindings_val :: body_values) ->
-                 analyze_let_star env bindings_val body_values
-             | _ -> failwith "Malformed let*: expected bindings list and body")
-
-        | Value.Symbol {name="setq"} ->
-            let pairs = Value.value_to_list_opt cdr_val |> Option.value ~default:[] in
-            analyze_setq env pairs
-
-        | Value.Symbol {name="lambda"} ->
-            (match Value.value_to_list_opt cdr_val with
-             | Some (arg_list_val :: body_values) ->
-                 analyze_lambda env arg_list_val body_values
-             | _ -> failwith "Malformed lambda: expected arg list and body")
-
-        | Value.Symbol {name="defun"} ->
-            (match Value.value_to_list_opt cdr_val with
-             | Some (Value.Symbol {name} :: arg_list_val :: body_values) ->
-                 analyze_defun env name arg_list_val body_values
-             | _ -> failwith "Malformed defun: expected name symbol, arg list, and body")
-
-        | Value.Symbol {name="cond"} ->
-            let clauses = Value.value_to_list_opt cdr_val |> Option.value ~default:[] in
-            analyze_cond env clauses
-
-        (* --- Default: Assume Function Call --- *)
-        | _ ->
-            let args_values = Value.value_to_list_opt cdr_val |> Option.value ~default:[] in
-            analyze_funcall env car_val args_values (* Analyze car_val as the function *)
-
-
-    (* --- Special Form Handlers (Need full rewrite logic for Value.t) --- *)
-
-    and analyze_if env c_val t_val e_val_opt : TypedAst.t * substitution =
-      (* Analyze condition (c_val) *)
-      let typed_cond, s_cond = analyze_expr env c_val in
-      let env_after_cond = List.map env ~f:(fun (n,ty) -> (n, apply_subst s_cond ty)) in
-      (* Analyze then branch (t_val) *)
-      let typed_then, s_then = analyze_expr env_after_cond t_val in
-      let subst_after_then = compose_subst s_cond s_then in
-      let env_after_then = List.map env ~f:(fun (n,ty) -> (n, apply_subst subst_after_then ty)) in
-      (* Analyze else branch (e_val_opt) *)
-      let typed_else_opt, final_subst = match e_val_opt with
-        | None -> (None, subst_after_then)
-        | Some e_val ->
-            let typed_else, s_else = analyze_expr env_after_then e_val in
-            (Some typed_else, compose_subst subst_after_then s_else)
-      in
-      (* Determine result type *)
-      let then_type = apply_subst final_subst (TypedAst.get_type typed_then) in
-      let else_type = match typed_else_opt with None -> T_Nil | Some te -> apply_subst final_subst (TypedAst.get_type te) in
-      let result_type = InferredType.type_union then_type else_type in
-      (TypedAst.If { cond=typed_cond; then_branch=typed_then; else_branch=typed_else_opt; inferred_type = result_type }, final_subst)
-
-
-    and analyze_let env bindings_val body_values : TypedAst.t * substitution =
-      let bindings_list = match Value.value_to_list_opt bindings_val with
-        | Some l -> l | None -> failwith "Let bindings must be a proper list" in
-      (* Analyze initializers in outer env *)
-      let analyzed_bindings, init_subst =
-        List.fold bindings_list ~init:([], Subst.empty)
-          ~f:(fun (acc_b, acc_s) b_val ->
-            let name, init_val = match b_val with
-              | Value.Symbol {name=n} -> (n, Value.Nil)
-              (* ***** CORRECT PATTERN HERE ***** *)
-              | Value.Cons {car=ref (Value.Symbol {name=n}); cdr=ref init_list_val} ->
-                  (match Value.value_to_list_opt init_list_val with
-                   | Some [i] -> (n, i) | _ -> failwith "Malformed let binding (init list)")
-              | _ -> failwith "Malformed let binding (structure)"
-            in
-            let env_for_init = List.map env ~f:(fun (n,ty)->(n, apply_subst acc_s ty)) in
-            let typed_init, init_s = analyze_expr env_for_init init_val in
-            (acc_b @ [(name, typed_init)], compose_subst acc_s init_s)
-          ) in
-      (* Create inner env *)
-      let inner_env_bindings = List.map analyzed_bindings ~f:(fun (n,ti) -> (n, apply_subst init_subst (TypedAst.get_type ti))) in
-      let inner_env = add_bindings env inner_env_bindings in
-      (* Analyze body *)
-      let typed_body, body_subst, result_type = analyze_progn_body inner_env body_values in
-      let final_subst = compose_subst init_subst body_subst in
-      let final_result_type = apply_subst final_subst result_type in
-      (TypedAst.Let { bindings = analyzed_bindings; body = typed_body; inferred_type = final_result_type }, final_subst)
-
-
-    and analyze_let_star env bindings_val body_values : TypedAst.t * substitution =
-       let bindings_list = match Value.value_to_list_opt bindings_val with
-        | Some l -> l | None -> failwith "Let* bindings must be a proper list" in
-       (* Fold through bindings sequentially *)
-       let bindings_env, analyzed_bindings, bindings_subst =
-         List.fold bindings_list ~init:(env, [], Subst.empty)
-           ~f:(fun (current_env, acc_b, acc_s) b_val ->
-             let name, init_val = match b_val with
-               | Value.Symbol {name=n} -> (n, Value.Nil)
-               (* ***** CORRECT PATTERN HERE ***** *)
-               | Value.Cons {car=ref (Value.Symbol {name=n}); cdr=ref init_list_val} ->
-                  (match Value.value_to_list_opt init_list_val with
-                   | Some [i] -> (n, i) | _ -> failwith "Malformed let* binding (init list)")
-               | _ -> failwith "Malformed let* binding (structure)"
-             in
-             let env_for_init = List.map current_env ~f:(fun (n,ty)->(n, apply_subst acc_s ty)) in
-             let typed_init, init_s = analyze_expr env_for_init init_val in
-             let combined_subst = compose_subst acc_s init_s in
-             let binding_type = apply_subst combined_subst (TypedAst.get_type typed_init) in
-             let next_env = add_binding current_env name binding_type in
-             (next_env, acc_b @ [(name, typed_init)], combined_subst)
-           ) in
-       (* Analyze body *)
-       let body_env = List.map bindings_env ~f:(fun (n,ty)->(n, apply_subst bindings_subst ty)) in
-       let typed_body, body_subst, result_type = analyze_progn_body body_env body_values in
-       let final_subst = compose_subst bindings_subst body_subst in
-       let final_result_type = apply_subst final_subst result_type in
-       (TypedAst.LetStar { bindings = analyzed_bindings; body = typed_body; inferred_type = final_result_type }, final_subst)
-
-
-    and analyze_setq env pairs_values : TypedAst.t * substitution =
-      if List.length pairs_values % 2 <> 0 then failwith "Setq needs even args";
-      let rec process_pairs pairs acc_typed_pairs acc_subst =
-        match pairs with
-        | [] -> (List.rev acc_typed_pairs, acc_subst)
-        | Value.Symbol {name=var_name} :: value_form :: rest ->
-            let env_for_value = List.map env ~f:(fun (n,ty)->(n, apply_subst acc_subst ty)) in
-            let typed_value, value_subst = analyze_expr env_for_value value_form in
-            let current_subst = compose_subst acc_subst value_subst in
-            let value_type = apply_subst current_subst (TypedAst.get_type typed_value) in
-            (* Unify with existing type *)
-            let final_subst = match List.Assoc.find env var_name ~equal:String.equal with
-              | Some existing_type ->
-                  (try compose_subst current_subst (unify (apply_subst current_subst existing_type) value_type)
-                   with Unification_error _ -> current_subst (* Ignore unification error on setq *))
-              | None -> current_subst
-            in
-            process_pairs rest ((var_name, typed_value) :: acc_typed_pairs) final_subst
-        | not_symbol :: _ -> failwithf "Setq expected symbol, got %s" (!Value.to_string not_symbol) ()
-        | _ -> failwith "Malformed setq structure"
-      in
-      let typed_pairs, final_subst = process_pairs pairs_values [] Subst.empty in
-      let result_type = match List.last typed_pairs with None -> T_Nil | Some (_,v) -> apply_subst final_subst (TypedAst.get_type v) in
-      (TypedAst.Setq({ pairs = typed_pairs; inferred_type = result_type }), final_subst)
-
-
-    and analyze_lambda env arg_list_val body_values : TypedAst.t * substitution =
-      let arg_spec = ArgListParser.parse arg_list_val in
-      (* Create fresh vars for args *)
-      let create_binding name = (name, generate_fresh_type_var()) in
-      let arg_bindings =
-         List.map arg_spec.required ~f:create_binding @
-         List.map arg_spec.optional ~f:(fun (n,_) -> create_binding n) @
-         (match arg_spec.rest with Some n -> [create_binding n] | None -> [])
-       in
-      let inner_env = add_bindings env arg_bindings in
-      (* Analyze body *)
-      let typed_body, body_subst, body_return_type = analyze_progn_body inner_env body_values in
-      (* Determine final signature *)
-      let final_arg_types = List.map arg_bindings ~f:(fun (_, ty) -> apply_subst body_subst ty) in
-      let final_return_type = apply_subst body_subst body_return_type in
-      let fun_info = { InferredType.arg_types = Some final_arg_types; return_type = final_return_type } in
-      let inferred_type = InferredType.T_Function fun_info in
-      (* Pass the *parsed* arg_spec, not the value *)
-      let node = TypedAst.Lambda { args = arg_spec; body = typed_body; inferred_type } in
-      (node, Subst.empty) (* Lambda subst is internal *)
-
-
-    and analyze_defun env name arg_list_val body_values : TypedAst.t * substitution =
-      let arg_spec = ArgListParser.parse arg_list_val in
-      (* Create fresh vars *)
-      let arg_bindings =
-         List.map arg_spec.required ~f:(fun n->(n, generate_fresh_type_var())) @
-         List.map arg_spec.optional ~f:(fun (n,_)->(n, generate_fresh_type_var())) @
-         (match arg_spec.rest with Some n -> [(n, generate_fresh_type_var())] | None -> []) in
-       let initial_ret_type_var = generate_fresh_type_var() in
-       let initial_fun_type = T_Function { arg_types = Some (List.map arg_bindings ~f:snd); return_type = initial_ret_type_var } in
-       (* Add function itself for recursion *)
-       let env_for_body = add_bindings (add_binding env name initial_fun_type) arg_bindings in
-       (* Analyze body *)
-       let typed_body, body_subst, body_return_type = analyze_progn_body env_for_body body_values in
-       (* Unify return types *)
-       let final_subst = try compose_subst body_subst (unify (apply_subst body_subst initial_ret_type_var) (apply_subst body_subst body_return_type)) with Unification_error _ -> body_subst in
-       (* Final signature *)
-       let final_arg_types = List.map arg_bindings ~f:(fun (_,ty) -> apply_subst final_subst ty) in
-       let final_return_type = apply_subst final_subst body_return_type in
-       let final_fun_info = { InferredType.arg_types = Some final_arg_types; return_type = final_return_type } in
-       let final_fun_type = InferredType.T_Function final_fun_info in
-       (* Pass parsed arg_spec *)
-       let node = TypedAst.Defun { name = name; args = arg_spec; body = typed_body; fun_type = final_fun_type; inferred_type = T_Symbol } in
-       (node, Subst.empty) (* Defun subst handled in toplevel *)
-
-
-    and analyze_cond env clause_values : TypedAst.t * substitution =
-      let analyzed_clauses, final_subst, result_type =
-        List.fold clause_values ~init:([], Subst.empty, T_Nil)
-          ~f:(fun (acc_clauses, acc_subst, acc_type) clause_val ->
-            match Value.value_to_list_opt clause_val with
-            | Some (test_val :: body_vals) ->
-                let env_for_clause = List.map env ~f:(fun (n,ty) -> (n, apply_subst acc_subst ty)) in
-                let typed_test, test_subst = analyze_expr env_for_clause test_val in
-                let composed_subst = compose_subst acc_subst test_subst in
-                let env_after_test = List.map env ~f:(fun (n,ty)->(n, apply_subst composed_subst ty)) in
-                (* Analyze body *)
-                let typed_body, body_subst, clause_result_type =
-                  if List.is_empty body_vals then
-                     ([typed_test], Subst.empty, apply_subst composed_subst (TypedAst.get_type typed_test))
-                  else
-                     analyze_progn_body env_after_test body_vals
-                in
-                let final_clause_subst = compose_subst composed_subst body_subst in
-                let final_clause_type = apply_subst final_clause_subst clause_result_type in
-                (acc_clauses @ [(typed_test, typed_body)], final_clause_subst, InferredType.type_union acc_type final_clause_type)
-            | _ -> failwith "Malformed cond clause: must be a list"
-          )
-      in
-      (TypedAst.Cond ({ clauses = analyzed_clauses; inferred_type = result_type }), final_subst)
-
-
-    and analyze_funcall env func_val args_values : TypedAst.t * substitution =
-      (* Analyze function expression *)
-      let typed_head, head_subst = analyze_expr env func_val in
-      (* Analyze arguments sequentially *)
-      let args_subst, typed_args = List.fold_map args_values ~init:head_subst
-        ~f:(fun acc_s arg_val ->
-          let env_for_arg = List.map env ~f:(fun (n,ty)->(n, apply_subst acc_s ty)) in
-          let typed_arg, arg_s = analyze_expr env_for_arg arg_val in
-          (compose_subst acc_s arg_s, typed_arg)
-        )
-      in
-      (* Get types after substitutions *)
-      let func_type = apply_subst args_subst (TypedAst.get_type typed_head) in
-      let actual_arg_types = List.map typed_args ~f:(fun ta -> apply_subst args_subst (TypedAst.get_type ta)) in
-
-      (* Unify with signature helper *)
-      let unify_with_sig (finfo: InferredType.fun_info) : InferredType.t * substitution =
-        try
-          let sig_arg_types_opt, sig_return_type = instantiate_fun_sig finfo in
-          match sig_arg_types_opt with
-          | None -> (sig_return_type, args_subst) (* Varargs *)
-          | Some sig_arg_types ->
-              if List.length sig_arg_types <> List.length actual_arg_types then
-                raise (Unification_error "Arity mismatch")
-              else
-                let final_subst = List.fold2_exn sig_arg_types actual_arg_types ~init:args_subst
-                  ~f:(fun current_subst sig_arg actual_arg ->
-                      compose_subst current_subst (unify (apply_subst current_subst sig_arg) (apply_subst current_subst actual_arg)))
-                in (apply_subst final_subst sig_return_type, final_subst)
-        with Unification_error _ -> (T_Unknown, args_subst) (* Fallback *)
-      in
-
-      (* Determine result type *)
-      let result_type, final_subst = match func_type with
-        | T_Function finfo -> unify_with_sig finfo
-        | T_Symbol | T_Keyword -> (* Check builtins *)
-            (match func_val with
-             | Value.Symbol {name} | Value.Keyword name ->
-                 (match get_builtin_signature name with Some finfo -> unify_with_sig finfo | None -> (T_Any, args_subst))
-             | _ -> (T_Any, args_subst))
-        | T_Any -> (T_Any, args_subst) | T_Unknown -> (T_Unknown, args_subst)
-        | T_Union _ -> (T_Any, args_subst) (* Simplified union call *)
-        | _ -> (T_Unknown, args_subst) (* Calling non-function *)
-      in
-      (TypedAst.Funcall { func = typed_head; args = typed_args; inferred_type = result_type }, final_subst)
-
-
-    (* --- Top Level Analysis --- *)
-    (* Takes Value.t list *)
-    let analyze_toplevel (values : Value.t list)
-        : TypedAst.t list * (string * InferredType.t) list =
-      let final_env_map = ref String.Map.empty in
-      let final_subst = ref Subst.empty in
-
-      let typed_asts = List.map values ~f:(fun value ->
-          let current_env = Map.to_alist !final_env_map in
-          let typed_ast, subst = analyze_expr current_env value in
-          final_subst := compose_subst !final_subst subst;
-          (* Update global env for defun *)
-          (match typed_ast with
-           | TypedAst.Defun { name; fun_type; _ } ->
-               final_env_map := Map.set !final_env_map ~key:name ~data:(apply_subst !final_subst fun_type)
-           | _ -> ()
-          );
-          final_env_map := Map.map !final_env_map ~f:(apply_subst !final_subst);
-          typed_ast
-        )
-      in
-      (* Final pass to apply substitution to TAST *)
-      let rec final_apply tast =
-        let apply_t = apply_subst !final_subst in
-        match tast with
-        | TypedAst.Atom ({ inferred_type=t; _ } as r) -> TypedAst.Atom { r with inferred_type = apply_t t }
-        | TypedAst.Quote ({ inferred_type=t; _ } as r) -> TypedAst.Quote { r with inferred_type = apply_t t }
-        | TypedAst.If ({ inferred_type=t; cond; then_branch; else_branch; _ } as r) -> TypedAst.If { r with cond=final_apply cond; then_branch=final_apply then_branch; else_branch=Option.map else_branch ~f:final_apply; inferred_type=apply_t t }
-        | TypedAst.Progn ({ inferred_type=t; forms; _ } as r) -> TypedAst.Progn { r with forms=List.map forms ~f:final_apply; inferred_type=apply_t t }
-        | TypedAst.Let ({ inferred_type=t; bindings; body; _ } as r) -> TypedAst.Let { r with bindings=List.map bindings ~f:(fun (n,t)->(n, final_apply t)); body=List.map body ~f:final_apply; inferred_type=apply_t t }
-        | TypedAst.LetStar ({ inferred_type=t; bindings; body; _ } as r) -> TypedAst.LetStar { r with bindings=List.map bindings ~f:(fun (n,t)->(n, final_apply t)); body=List.map body ~f:final_apply; inferred_type=apply_t t }
-        | TypedAst.Setq ({ inferred_type=t; pairs; _ } as r) -> TypedAst.Setq { r with pairs=List.map pairs ~f:(fun (n,t)->(n, final_apply t)); inferred_type=apply_t t }
-        | TypedAst.Lambda ({ inferred_type=t; body; _ } as r) -> TypedAst.Lambda { r with body=List.map body ~f:final_apply; inferred_type=apply_t t }
-        | TypedAst.Defun ({ inferred_type=t; fun_type; body; _ } as r) -> TypedAst.Defun { r with body=List.map body ~f:final_apply; fun_type=apply_t fun_type; inferred_type=apply_t t }
-        | TypedAst.Cond ({ inferred_type=t; clauses; _ } as r) -> TypedAst.Cond { r with clauses=List.map clauses ~f:(fun (tst,bdy)->(final_apply tst, List.map bdy ~f:final_apply)); inferred_type=apply_t t }
-        | TypedAst.Funcall ({ inferred_type=t; func; args; _ } as r) -> TypedAst.Funcall { r with func=final_apply func; args=List.map args ~f:final_apply; inferred_type=apply_t t }
-      in
-      let final_tasts = List.map typed_asts ~f:final_apply in
-      (final_tasts, Map.to_alist !final_env_map)
-
-    
+{
+}

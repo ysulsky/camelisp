@@ -125,12 +125,11 @@
               (* Optional *)
               | `Optional, Value.Symbol {name} :: rest_ast -> (* Optional without default *)
                   parse_internal `Optional rev_required ((name, None) :: rev_optional) rest_opt rest_ast
-              (* ***** FIX HERE ***** *)
-              | `Optional, Value.Cons { car = ref (Value.Symbol {name}); cdr = ref default_list_val } :: rest_ast -> (* Optional with default *)
+              | `Optional, Value.Cons { car = Value.Symbol {name}; cdr = default_list_val } :: rest_ast -> (* Optional with default *)
                   (match Value.value_to_list_opt default_list_val with
                    | Some [default_form] ->
                        parse_internal `Optional rev_required ((name, Some default_form) :: rev_optional) rest_opt rest_ast
-                   | _ -> failwithf "Malformed optional arg with default: %s" (!Value.to_string (Value.Cons { car = ref (Value.Symbol {name}); cdr = ref default_list_val })) ())
+                   | _ -> failwithf "Malformed optional arg with default: %s" (!Value.to_string (Value.Cons { car = Value.Symbol {name}; cdr = default_list_val })) ())
               | `Optional, [] -> { required = List.rev rev_required; optional = List.rev rev_optional; rest = None }
 
               (* Rest *)
@@ -157,24 +156,24 @@
     exception Unification_error of string
     let rec apply_subst subst t = (* ... keep existing implementation ... *) InferredType.(
         match t with
-        | T_Var v -> (match Map.find subst v with Some bound_t -> apply_subst subst bound_t | None -> t)
-        | T_Cons info -> T_Cons { car_type = apply_subst subst info.car_type; cdr_type = apply_subst subst info.cdr_type }
-        | T_Vector info -> T_Vector { element_type = apply_subst subst info.element_type }
-        | T_Function info -> T_Function { arg_types = Option.map info.arg_types ~f:(List.map ~f:(apply_subst subst)); return_type = apply_subst subst info.return_type }
-        | T_Union s -> normalize_union_set (InferredTypeSet.map s ~f:(apply_subst subst))
-        | T_Unknown | T_Any | T_Nil | T_Bool | T_Int | T_Float | T_Char | T_String | T_Symbol | T_Keyword as other -> other
+        | InferredType.T_Var v -> (match Map.find subst v with Some bound_t -> apply_subst subst bound_t | None -> t)
+        | InferredType.T_Cons info -> T_Cons { car_type = apply_subst subst info.car_type; cdr_type = apply_subst subst info.cdr_type }
+        | InferredType.T_Vector info -> T_Vector { element_type = apply_subst subst info.element_type }
+        | InferredType.T_Function info -> T_Function { arg_types = Option.map info.arg_types ~f:(List.map ~f:(apply_subst subst)); return_type = apply_subst subst info.return_type }
+        | InferredType.T_Union s -> normalize_union_set (InferredTypeSet.map s ~f:(apply_subst subst))
+        | InferredType.T_Unknown | T_Any | T_Nil | T_Bool | T_Int | T_Float | T_Char | T_String | T_Symbol | T_Keyword as other -> other
         )
     let compose_subst s1 s2 = (* ... keep existing implementation ... *)
         let s2_mapped = Subst.map s2 ~f:(apply_subst s1) in
         Map.merge_skewed s1 s2_mapped ~combine:(fun ~key:_ v1 _ -> v1)
     let rec occurs_check var_name t = (* ... keep existing implementation ... *) InferredType.(
         match t with
-        | T_Var v -> String.equal v var_name
-        | T_Cons { car_type; cdr_type } -> occurs_check var_name car_type || occurs_check var_name cdr_type
-        | T_Vector { element_type } -> occurs_check var_name element_type
-        | T_Function { arg_types; return_type } -> (Option.value_map arg_types ~default:false ~f:(List.exists ~f:(occurs_check var_name))) || occurs_check var_name return_type
-        | T_Union s -> Set.exists s ~f:(occurs_check var_name)
-        | T_Unknown | T_Any | T_Nil | T_Bool | T_Int | T_Float | T_Char | T_String | T_Symbol | T_Keyword -> false
+        | InferredType.T_Var v -> String.equal v var_name
+        | InferredType.T_Cons { car_type; cdr_type } -> occurs_check var_name car_type || occurs_check var_name cdr_type
+        | InferredType.T_Vector { element_type } -> occurs_check var_name element_type
+        | InferredType.T_Function { arg_types; return_type } -> (Option.value_map arg_types ~default:false ~f:(List.exists ~f:(occurs_check var_name))) || occurs_check var_name return_type
+        | InferredType.T_Union s -> Set.exists s ~f:(occurs_check var_name)
+        | InferredType.T_Unknown | T_Any | T_Nil | T_Bool | T_Int | T_Float | T_Char | T_String | T_Symbol | T_Keyword -> false
         )
     let rec unify t1 t2 = (* ... keep existing implementation ... *)
         if [%compare.equal: InferredType.t] t1 t2 then Subst.empty
@@ -212,12 +211,12 @@
     let instantiate_type t = (* ... keep existing implementation ... *)
         let subst_ref = ref Subst.empty in
         let rec inst ty = InferredType.(match ty with
-            | T_Var v -> (match Map.find !subst_ref v with Some fresh_var -> fresh_var | None -> let fresh_var = generate_fresh_type_var() in subst_ref := Map.add_exn !subst_ref ~key:v ~data:fresh_var; fresh_var)
-            | T_Cons info -> T_Cons { car_type = inst info.car_type; cdr_type = inst info.cdr_type }
-            | T_Vector info -> T_Vector { element_type = inst info.element_type }
-            | T_Function info -> T_Function { arg_types = Option.map info.arg_types ~f:(List.map ~f:inst); return_type = inst info.return_type }
-            | T_Union s -> normalize_union_set (InferredTypeSet.map s ~f:inst)
-            | T_Unknown | T_Any | T_Nil | T_Bool | T_Int | T_Float | T_Char | T_String | T_Symbol | T_Keyword as other -> other)
+            | InferredType.T_Var v -> (match Map.find !subst_ref v with Some fresh_var -> fresh_var | None -> let fresh_var = generate_fresh_type_var() in subst_ref := Map.add_exn !subst_ref ~key:v ~data:fresh_var; fresh_var)
+            | InferredType.T_Cons info -> T_Cons { car_type = inst info.car_type; cdr_type = inst info.cdr_type }
+            | InferredType.T_Vector info -> T_Vector { element_type = inst info.element_type }
+            | InferredType.T_Function info -> T_Function { arg_types = Option.map info.arg_types ~f:(List.map ~f:inst); return_type = inst info.return_type }
+            | InferredType.T_Union s -> normalize_union_set (InferredTypeSet.map s ~f:inst)
+            | InferredType.T_Unknown | T_Any | T_Nil | T_Bool | T_Int | T_Float | T_Char | T_String | T_Symbol | T_Keyword as other -> other)
         in (inst t, !subst_ref)
     let instantiate_fun_sig finfo = (* ... keep existing implementation ... *)
         let temp_fun_type = InferredType.T_Function finfo in
@@ -230,25 +229,25 @@
     let rec type_of_quoted_data (value : Value.t) : InferredType.t =
       let open InferredType in
       match value with
-      | Value.Nil -> T_Nil
-      | Value.T -> T_Bool (* Treat 't' as Bool in quotes *)
-      | Value.Int _ -> T_Int
-      | Value.Float _ -> T_Float
-      | Value.String _ -> T_String
-      | Value.Symbol _ -> T_Symbol
-      | Value.Keyword _ -> T_Keyword
-      | Value.Char _ -> T_Char
+      | Value.Nil -> InferredType.T_Nil
+      | Value.T -> InferredType.T_Bool (* Treat 't' as Bool in quotes *)
+      | Value.Int _ -> InferredType.T_Int
+      | Value.Float _ -> InferredType.T_Float
+      | Value.String _ -> InferredType.T_String
+      | Value.Symbol _ -> InferredType.T_Symbol
+      | Value.Keyword _ -> InferredType.T_Keyword
+      | Value.Char _ -> InferredType.T_Char
       | Value.Vector arr ->
           (* Infer vector type based on elements - simplified: union of element types *)
           let element_types = Array.map arr ~f:type_of_quoted_data |> Array.to_list in
-          let union_type = List.fold element_types ~init:T_Nil ~f:type_union in
-          T_Vector { element_type = union_type }
+          let union_type = List.fold element_types ~init:InferredType.T_Nil ~f:type_union in
+          InferredType.T_Vector { element_type = union_type }
       | Value.Cons { car; cdr } ->
           (* Recursively determine car and cdr types *)
-          let car_t = type_of_quoted_data !car in
-          let cdr_t = type_of_quoted_data !cdr in
-          T_Cons { car_type = car_t; cdr_type = cdr_t }
-      | Value.Function _ | Value.Builtin _ -> T_Function { arg_types=None; return_type=T_Any } (* Quoted functions are opaque *)
+          let car_t = type_of_quoted_data car in
+          let cdr_t = type_of_quoted_data cdr in
+          InferredType.T_Cons { car_type = car_t; cdr_type = cdr_t }
+      | Value.Function _ | Value.Builtin _ -> InferredType.T_Function { arg_types=None; return_type=T_Any } (* Quoted functions are opaque *)
 
 
     (* --- Built-in Function Type Signatures (Keep as is) --- *)
@@ -257,13 +256,13 @@
     let get_builtin_signature name = (* ... keep existing implementation ... *)
         let open InferredType in
         match name with
-        | "+" | "*" | "-" | "/" -> Some { arg_types = None; return_type = T_Int }
-        | "car" -> let input_type = type_union (T_Cons { car_type = tvar_a; cdr_type = T_Any }) T_Nil in Some { arg_types = Some [input_type]; return_type = type_union tvar_a T_Nil }
-        | "cdr" -> let input_type = type_union (T_Cons { car_type = T_Any; cdr_type = tvar_b }) T_Nil in Some { arg_types = Some [input_type]; return_type = type_union tvar_b T_Nil }
-        | "cons" -> Some { arg_types = Some [tvar_a; tvar_b]; return_type = T_Cons { car_type = tvar_a; cdr_type = tvar_b } }
-        | "integerp" | "stringp" | "symbolp" | "consp" | "listp" | "null" | "vectorp" | "floatp" | "keywordp" | "atom" | "functionp" -> Some { arg_types = Some [T_Any]; return_type = T_Bool }
-        | "eq" | "equal" -> Some { arg_types = Some [tvar_a; tvar_a]; return_type = T_Bool }
-        | "compile" | "interpret" | "assoc" | "list" | "setcar" | "setcdr" -> Some { arg_types = None; return_type = T_Any } (* Simplified *)
+        | "+" | "*" | "-" | "/" -> Some { arg_types = None; return_type = InferredType.T_Int }
+        | "car" -> let input_type = type_union (InferredType.T_Cons { car_type = tvar_a; cdr_type = T_Any }) T_Nil in Some { arg_types = Some [input_type]; return_type = type_union tvar_a T_Nil }
+        | "cdr" -> let input_type = type_union (InferredType.T_Cons { car_type = T_Any; cdr_type = tvar_b }) T_Nil in Some { arg_types = Some [input_type]; return_type = type_union tvar_b T_Nil }
+        | "cons" -> Some { arg_types = Some [tvar_a; tvar_b]; return_type = InferredType.T_Cons { car_type = tvar_a; cdr_type = tvar_b } }
+        | "integerp" | "stringp" | "symbolp" | "consp" | "listp" | "null" | "vectorp" | "floatp" | "keywordp" | "atom" | "functionp" -> Some { arg_types = Some [InferredType.T_Any]; return_type = T_Bool }
+        | "eq" | "equal" -> Some { arg_types = Some [tvar_a; tvar_a]; return_type = InferredType.T_Bool }
+        | "compile" | "interpret" | "assoc" | "list" | "setcar" | "setcdr" -> Some { arg_types = None; return_type = InferredType.T_Any } (* Simplified *)
         | _ -> None
 
     (* --- Helper to analyze progn-like body --- *)
@@ -288,29 +287,29 @@
         : TypedAst.t * substitution =
       match value with
       (* Atoms *)
-      | Value.Nil -> (TypedAst.Atom { value; inferred_type = T_Nil }, Subst.empty)
-      | Value.T -> (TypedAst.Atom { value; inferred_type = T_Bool }, Subst.empty)
-      | Value.Int _ -> (TypedAst.Atom { value; inferred_type = T_Int }, Subst.empty)
-      | Value.Float _ -> (TypedAst.Atom { value; inferred_type = T_Float }, Subst.empty)
-      | Value.String _ -> (TypedAst.Atom { value; inferred_type = T_String }, Subst.empty)
-      | Value.Keyword _ -> (TypedAst.Atom { value; inferred_type = T_Keyword }, Subst.empty)
-      | Value.Char _ -> (TypedAst.Atom { value; inferred_type = T_Char }, Subst.empty)
+      | Value.Nil -> (TypedAst.Atom { value; inferred_type = InferredType.T_Nil }, Subst.empty)
+      | Value.T -> (TypedAst.Atom { value; inferred_type = InferredType.T_Bool }, Subst.empty)
+      | Value.Int _ -> (TypedAst.Atom { value; inferred_type = InferredType.T_Int }, Subst.empty)
+      | Value.Float _ -> (TypedAst.Atom { value; inferred_type = InferredType.T_Float }, Subst.empty)
+      | Value.String _ -> (TypedAst.Atom { value; inferred_type = InferredType.T_String }, Subst.empty)
+      | Value.Keyword _ -> (TypedAst.Atom { value; inferred_type = InferredType.T_Keyword }, Subst.empty)
+      | Value.Char _ -> (TypedAst.Atom { value; inferred_type = InferredType.T_Char }, Subst.empty)
       | Value.Vector _ -> (* Type vector based on elements? Simplified: Any *)
-          (TypedAst.Atom { value; inferred_type = T_Vector {element_type = T_Any} }, Subst.empty)
+          (TypedAst.Atom { value; inferred_type = InferredType.T_Vector {element_type = T_Any} }, Subst.empty)
       | Value.Function _ | Value.Builtin _ -> (* Opaque function types *)
-           (TypedAst.Atom { value; inferred_type = T_Function {arg_types=None; return_type=T_Any} }, Subst.empty)
+           (TypedAst.Atom { value; inferred_type = InferredType.T_Function {arg_types=None; return_type=T_Any} }, Subst.empty)
 
       | Value.Symbol {name} as atom_val ->
           (* Look up symbol in environment *)
           let inferred_t = match List.Assoc.find env name ~equal:String.equal with
                            | Some t -> t
-                           | None -> T_Symbol (* Assume global or undefined *)
+                           | None -> InferredType.T_Symbol (* Assume global or undefined *)
           in
           (TypedAst.Atom { value = atom_val; inferred_type = inferred_t }, Subst.empty)
 
       (* Cons Cell: Potential special form or function call *)
       | Value.Cons { car; cdr } ->
-          analyze_cons_cell env !car !cdr
+          analyze_cons_cell env car cdr
 
     (* Helper to analyze cons cells *)
     and analyze_cons_cell env car_val cdr_val : TypedAst.t * substitution =
@@ -391,7 +390,7 @@
       in
       (* Determine result type *)
       let then_type = apply_subst final_subst (TypedAst.get_type typed_then) in
-      let else_type = match typed_else_opt with None -> T_Nil | Some te -> apply_subst final_subst (TypedAst.get_type te) in
+      let else_type = match typed_else_opt with None -> InferredType.T_Nil | Some te -> apply_subst final_subst (TypedAst.get_type te) in
       let result_type = InferredType.type_union then_type else_type in
       (TypedAst.If { cond=typed_cond; then_branch=typed_then; else_branch=typed_else_opt; inferred_type = result_type }, final_subst)
 
@@ -405,8 +404,7 @@
           ~f:(fun (acc_b, acc_s) b_val ->
             let name, init_val = match b_val with
               | Value.Symbol {name=n} -> (n, Value.Nil)
-              (* ***** FIX HERE (similar to Interpreter) ***** *)
-              | Value.Cons {car=ref (Value.Symbol {name=n}); cdr=ref init_list_val} ->
+              | Value.Cons {car= Value.Symbol {name=n}; cdr=init_list_val} ->
                   (match Value.value_to_list_opt init_list_val with
                    | Some [i] -> (n, i) | _ -> failwith "Malformed let binding (init list)")
               | _ -> failwith "Malformed let binding (structure)"
@@ -435,7 +433,7 @@
              let name, init_val = match b_val with
                | Value.Symbol {name=n} -> (n, Value.Nil)
                (* ***** FIX HERE (similar to Interpreter) ***** *)
-               | Value.Cons {car=ref (Value.Symbol {name=n}); cdr=ref init_list_val} ->
+               | Value.Cons {car=Value.Symbol {name=n}; cdr=init_list_val} ->
                   (match Value.value_to_list_opt init_list_val with
                    | Some [i] -> (n, i) | _ -> failwith "Malformed let* binding (init list)")
                | _ -> failwith "Malformed let* binding (structure)"
@@ -474,10 +472,9 @@
             in
             process_pairs rest ((var_name, typed_value) :: acc_typed_pairs) final_subst
         | not_symbol :: _ -> failwithf "Setq expected symbol, got %s" (!Value.to_string not_symbol) ()
-        | _ -> failwith "Malformed setq structure"
       in
       let typed_pairs, final_subst = process_pairs pairs_values [] Subst.empty in
-      let result_type = match List.last typed_pairs with None -> T_Nil | Some (_,v) -> apply_subst final_subst (TypedAst.get_type v) in
+      let result_type = match List.last typed_pairs with None -> InferredType.T_Nil | Some (_,v) -> apply_subst final_subst (TypedAst.get_type v) in
       (TypedAst.Setq({ pairs = typed_pairs; inferred_type = result_type }), final_subst)
 
 
@@ -511,7 +508,7 @@
          List.map arg_spec.optional ~f:(fun (n,_)->(n, generate_fresh_type_var())) @
          (match arg_spec.rest with Some n -> [(n, generate_fresh_type_var())] | None -> []) in
        let initial_ret_type_var = generate_fresh_type_var() in
-       let initial_fun_type = T_Function { arg_types = Some (List.map arg_bindings ~f:snd); return_type = initial_ret_type_var } in
+       let initial_fun_type = InferredType.T_Function { arg_types = Some (List.map arg_bindings ~f:snd); return_type = initial_ret_type_var } in
        (* Add function itself for recursion *)
        let env_for_body = add_bindings (add_binding env name initial_fun_type) arg_bindings in
        (* Analyze body *)
@@ -524,13 +521,13 @@
        let final_fun_info = { InferredType.arg_types = Some final_arg_types; return_type = final_return_type } in
        let final_fun_type = InferredType.T_Function final_fun_info in
        (* Pass parsed arg_spec *)
-       let node = TypedAst.Defun { name = name; args = arg_spec; body = typed_body; fun_type = final_fun_type; inferred_type = T_Symbol } in
+       let node = TypedAst.Defun { name = name; args = arg_spec; body = typed_body; fun_type = final_fun_type; inferred_type = InferredType.T_Symbol } in
        (node, Subst.empty) (* Defun subst handled in toplevel *)
 
 
     and analyze_cond env clause_values : TypedAst.t * substitution =
       let analyzed_clauses, final_subst, result_type =
-        List.fold clause_values ~init:([], Subst.empty, T_Nil)
+        List.fold clause_values ~init:([], Subst.empty, InferredType.T_Nil)
           ~f:(fun (acc_clauses, acc_subst, acc_type) clause_val ->
             match Value.value_to_list_opt clause_val with
             | Some (test_val :: body_vals) ->
@@ -583,20 +580,20 @@
                   ~f:(fun current_subst sig_arg actual_arg ->
                       compose_subst current_subst (unify (apply_subst current_subst sig_arg) (apply_subst current_subst actual_arg)))
                 in (apply_subst final_subst sig_return_type, final_subst)
-        with Unification_error _ -> (T_Unknown, args_subst) (* Fallback *)
+        with Unification_error _ -> (InferredType.T_Unknown, args_subst) (* Fallback *)
       in
 
       (* Determine result type *)
       let result_type, final_subst = match func_type with
-        | T_Function finfo -> unify_with_sig finfo
-        | T_Symbol | T_Keyword -> (* Check builtins *)
+        | InferredType.T_Function finfo -> unify_with_sig finfo
+        | InferredType.T_Symbol | T_Keyword -> (* Check builtins *)
             (match func_val with
              | Value.Symbol {name} | Value.Keyword name ->
-                 (match get_builtin_signature name with Some finfo -> unify_with_sig finfo | None -> (T_Any, args_subst))
-             | _ -> (T_Any, args_subst))
-        | T_Any -> (T_Any, args_subst) | T_Unknown -> (T_Unknown, args_subst)
-        | T_Union _ -> (T_Any, args_subst) (* Simplified union call *)
-        | _ -> (T_Unknown, args_subst) (* Calling non-function *)
+                 (match get_builtin_signature name with Some finfo -> unify_with_sig finfo | None -> (InferredType.T_Any, args_subst))
+             | _ -> (InferredType.T_Any, args_subst))
+        | InferredType.T_Any -> (T_Any, args_subst) | T_Unknown -> (T_Unknown, args_subst)
+        | InferredType.T_Union _ -> (T_Any, args_subst) (* Simplified union call *)
+        | _ -> (InferredType.T_Unknown, args_subst) (* Calling non-function *)
       in
       (TypedAst.Funcall { func = typed_head; args = typed_args; inferred_type = result_type }, final_subst)
 
@@ -628,15 +625,15 @@
         match tast with
         | TypedAst.Atom ({ inferred_type=t; _ } as r) -> TypedAst.Atom { r with inferred_type = apply_t t }
         | TypedAst.Quote ({ inferred_type=t; _ } as r) -> TypedAst.Quote { r with inferred_type = apply_t t }
-        | TypedAst.If ({ inferred_type=t; cond; then_branch; else_branch; _ } as r) -> TypedAst.If { r with cond=final_apply cond; then_branch=final_apply then_branch; else_branch=Option.map else_branch ~f:final_apply; inferred_type=apply_t t }
-        | TypedAst.Progn ({ inferred_type=t; forms; _ } as r) -> TypedAst.Progn { r with forms=List.map forms ~f:final_apply; inferred_type=apply_t t }
-        | TypedAst.Let ({ inferred_type=t; bindings; body; _ } as r) -> TypedAst.Let { r with bindings=List.map bindings ~f:(fun (n,t)->(n, final_apply t)); body=List.map body ~f:final_apply; inferred_type=apply_t t }
-        | TypedAst.LetStar ({ inferred_type=t; bindings; body; _ } as r) -> TypedAst.LetStar { r with bindings=List.map bindings ~f:(fun (n,t)->(n, final_apply t)); body=List.map body ~f:final_apply; inferred_type=apply_t t }
-        | TypedAst.Setq ({ inferred_type=t; pairs; _ } as r) -> TypedAst.Setq { r with pairs=List.map pairs ~f:(fun (n,t)->(n, final_apply t)); inferred_type=apply_t t }
+        | TypedAst.If ({ inferred_type=t; cond; then_branch; else_branch; _ }) -> TypedAst.If { cond=final_apply cond; then_branch=final_apply then_branch; else_branch=Option.map else_branch ~f:final_apply; inferred_type=apply_t t }
+        | TypedAst.Progn ({ inferred_type=t; forms; _ }) -> TypedAst.Progn { forms=List.map forms ~f:final_apply; inferred_type=apply_t t }
+        | TypedAst.Let ({ inferred_type=t; bindings; body; _ }) -> TypedAst.Let { bindings=List.map bindings ~f:(fun (n,t)->(n, final_apply t)); body=List.map body ~f:final_apply; inferred_type=apply_t t }
+        | TypedAst.LetStar ({ inferred_type=t; bindings; body; _ }) -> TypedAst.LetStar { bindings=List.map bindings ~f:(fun (n,t)->(n, final_apply t)); body=List.map body ~f:final_apply; inferred_type=apply_t t }
+        | TypedAst.Setq ({ inferred_type=t; pairs; _ }) -> TypedAst.Setq { pairs=List.map pairs ~f:(fun (n,t)->(n, final_apply t)); inferred_type=apply_t t }
         | TypedAst.Lambda ({ inferred_type=t; body; _ } as r) -> TypedAst.Lambda { r with body=List.map body ~f:final_apply; inferred_type=apply_t t }
         | TypedAst.Defun ({ inferred_type=t; fun_type; body; _ } as r) -> TypedAst.Defun { r with body=List.map body ~f:final_apply; fun_type=apply_t fun_type; inferred_type=apply_t t }
-        | TypedAst.Cond ({ inferred_type=t; clauses; _ } as r) -> TypedAst.Cond { r with clauses=List.map clauses ~f:(fun (tst,bdy)->(final_apply tst, List.map bdy ~f:final_apply)); inferred_type=apply_t t }
-        | TypedAst.Funcall ({ inferred_type=t; func; args; _ } as r) -> TypedAst.Funcall { r with func=final_apply func; args=List.map args ~f:final_apply; inferred_type=apply_t t }
+        | TypedAst.Cond ({ inferred_type=t; clauses; _ }) -> TypedAst.Cond { clauses=List.map clauses ~f:(fun (tst,bdy)->(final_apply tst, List.map bdy ~f:final_apply)); inferred_type=apply_t t }
+        | TypedAst.Funcall ({ inferred_type=t; func; args; _ }) -> TypedAst.Funcall { func=final_apply func; args=List.map args ~f:final_apply; inferred_type=apply_t t }
       in
       let final_tasts = List.map typed_asts ~f:final_apply in
       (final_tasts, Map.to_alist !final_env_map)

@@ -36,7 +36,7 @@ module rec T : sig
   }
   and arg_spec = {
       required: string list;
-      optional: (string * Sexp.t option) list;
+      optional: (string * Value.t option) list;
       rest: string option;
     }
   [@@deriving compare, sexp] (* Derive functions within the module T *)
@@ -51,7 +51,7 @@ end = struct
   and cons_info = { car_type: t; cdr_type: t; }
   and vector_info = { element_type: t; }
   and fun_info = { arg_types: t list option; return_type: t; }
-  and arg_spec = { required: string list; optional: (string * Sexp.t option) list; rest: string option; }
+  and arg_spec = { required: string list; optional: (string * Value.t option) list; rest: string option; }
   [@@deriving compare, sexp]
 end
 (* Define the Set module using 'and' for mutual recursion with module T *)

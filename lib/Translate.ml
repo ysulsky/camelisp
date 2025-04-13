@@ -31,8 +31,8 @@ module Translate_quote = struct
         sprintf "(Value.Vector [|%s|])" (String.concat ~sep:"; " elements_code)
     | Value.Cons { car; cdr } ->
         sprintf "(Value.Cons { car = ref (%s); cdr = ref (%s) })"
-          (translate_quoted_data !car)
-          (translate_quoted_data !cdr)
+          (translate_quoted_data car)
+          (translate_quoted_data cdr)
     (* Cannot translate closures or builtins directly *)
     | Value.Function _ -> "\"(Value.Function <opaque>)\""
     | Value.Builtin _ -> "\"(Value.Builtin <opaque>)\""
@@ -114,9 +114,9 @@ and translate_expr env texpr target_repr =
   let generated_code = translate_node env texpr in
   let source_repr =
     match node_type with
-    | T_Int -> R_Int
-    | T_Float -> R_Float
-    | T_Nil | T_Bool -> R_Bool
+    | InferredType.T_Int -> R_Int
+    | InferredType.T_Float -> R_Float
+    | InferredType.T_Nil | T_Bool -> R_Bool
     | _ -> R_Value
   in
   match (source_repr, target_repr) with
@@ -146,42 +146,42 @@ and translate_node env texpr =
   (* Atom case now uses the Value.t stored *)
   | TypedAst.Atom { value; inferred_type } -> begin
       match inferred_type with
-      | T_Int -> (
+      | InferredType.T_Int -> (
           match value with
           | Value.Int i -> Int.to_string i
-          | _ -> failwith "Type mismatch: T_Int but not Value.Int")
-      | T_Float -> (
+          | _ -> failwith "Type mismatch: InferredType.T_Int but not Value.Int")
+      | InferredType.T_Float -> (
           match value with
           | Value.Float f -> Float.to_string f
-          | _ -> failwith "Type mismatch: T_Float but not Value.Float")
-      | T_Nil -> "false"
-      | T_Bool -> (
+          | _ -> failwith "Type mismatch: InferredType.T_Float but not Value.Float")
+      | InferredType.T_Nil -> "false"
+      | InferredType.T_Bool -> (
           match value with
           | Value.T -> "true"
           | Value.Nil -> "false"
-          | _ -> failwith "Type mismatch: T_Bool but not T/Nil")
-      | T_Keyword -> (
+          | _ -> failwith "Type mismatch: InferredType.T_Bool but not T/Nil")
+      | InferredType.T_Keyword -> (
           match value with
           | Value.Keyword k -> sprintf "(Value.Keyword %S)" k
-          | _ -> failwith "Type mismatch: T_Keyword")
-      | T_String -> (
+          | _ -> failwith "Type mismatch: InferredType.T_Keyword")
+      | InferredType.T_String -> (
           match value with
           | Value.String s -> sprintf "(Value.String %S)" s
-          | _ -> failwith "Type mismatch: T_String")
-      | T_Char -> (
+          | _ -> failwith "Type mismatch: InferredType.T_String")
+      | InferredType.T_Char -> (
           match value with
           | Value.Char c -> sprintf "(Value.Char %C)" c
-          | _ -> failwith "Type mismatch: T_Char")
-      | T_Symbol -> (
+          | _ -> failwith "Type mismatch: InferredType.T_Char")
+      | InferredType.T_Symbol -> (
           match value with
           | Value.Symbol { name } -> (
               match lookup_var_info env name with
               | Some entry -> sprintf "!%s" entry.ocaml_name (* Access local ref *)
               | None -> sprintf "(Runtime.lookup_variable %S)" name (* Global *)
               )
-          | _ -> failwith "Type mismatch: T_Symbol but not Value.Symbol")
-      | T_Var _ | T_Cons _ | T_Vector _ | T_Function _ | T_Union _ | T_Any
-      | T_Unknown -> (
+          | _ -> failwith "Type mismatch: InferredType.T_Symbol but not Value.Symbol")
+      | InferredType.T_Var _ | T_Cons _ | T_Vector _ | T_Function _ | T_Union _ | T_Any
+      | InferredType.T_Unknown -> (
           (* These complex types are represented as Value.t *)
           match value with
           | Value.Symbol { name } -> (
@@ -211,9 +211,9 @@ and translate_node env texpr =
       let cond_code = to_bool env cond in
       let target_repr =
         match inferred_type with
-        | T_Int -> R_Int
-        | T_Float -> R_Float
-        | T_Bool | T_Nil -> R_Bool
+        | InferredType.T_Int -> R_Int
+        | InferredType.T_Float -> R_Float
+        | InferredType.T_Bool | T_Nil -> R_Bool
         | _ -> R_Value
       in
       let then_code = translate_expr env then_branch target_repr in
@@ -221,7 +221,7 @@ and translate_node env texpr =
         match else_branch with
         | None ->
             translate_expr env
-              (TypedAst.Atom { value = Value.Nil; inferred_type = T_Nil })
+              (TypedAst.Atom { value = Value.Nil; inferred_type = InferredType.T_Nil })
               target_repr
         | Some eb -> translate_expr env eb target_repr
       in
@@ -238,7 +238,7 @@ and translate_node env texpr =
       translate_setq env pairs inferred_type
   | TypedAst.Lambda { args; body; inferred_type } ->
       translate_lambda env args body inferred_type
-  | TypedAst.Defun { name; inferred_type = T_Symbol; _ } ->
+  | TypedAst.Defun { name; inferred_type = InferredType.T_Symbol; _ } ->
       sprintf "(Value.Symbol { name = %S })" name
   | TypedAst.Defun { name; inferred_type = other_type; _ } ->
       Printf.eprintf
@@ -255,13 +255,13 @@ and translate_progn env forms inferred_type =
   match forms with
   | [] ->
       translate_expr env
-        (TypedAst.Atom { value = Value.Nil; inferred_type = T_Nil })
+        (TypedAst.Atom { value = Value.Nil; inferred_type = InferredType.T_Nil })
         R_Value
   | [ last ] -> translate_node env last
   | _ ->
       let target_repr =
         match inferred_type with
-        | T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
+        | InferredType.T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
         | _ -> R_Value
       in
       let translated_forms = List.map forms ~f:(fun expr -> to_value env expr) in
@@ -284,9 +284,9 @@ and translate_let env bindings body inferred_type =
         let ocaml_name = generate_ocaml_var elisp_name in
         let repr, init_code =
           match init_type with
-          | T_Int -> (R_Int, to_int !inner_env_ref typed_init)
-          | T_Float -> (R_Float, to_float !inner_env_ref typed_init)
-          | T_Bool | T_Nil -> (R_Bool, to_bool !inner_env_ref typed_init)
+          | InferredType.T_Int -> (R_Int, to_int !inner_env_ref typed_init)
+          | InferredType.T_Float -> (R_Float, to_float !inner_env_ref typed_init)
+          | InferredType.T_Bool | T_Nil -> (R_Bool, to_bool !inner_env_ref typed_init)
           | _ -> (R_Value, to_value !inner_env_ref typed_init)
         in
         inner_env_ref := add_binding !inner_env_ref elisp_name ocaml_name repr;
@@ -311,9 +311,9 @@ and translate_let_star env bindings body inferred_type =
         let ocaml_name = generate_ocaml_var elisp_name in
         let repr, init_code =
           match init_type with
-          | T_Int -> (R_Int, to_int current_env typed_init)
-          | T_Float -> (R_Float, to_float current_env typed_init)
-          | T_Bool | T_Nil -> (R_Bool, to_bool current_env typed_init)
+          | InferredType.T_Int -> (R_Int, to_int current_env typed_init)
+          | InferredType.T_Float -> (R_Float, to_float current_env typed_init)
+          | InferredType.T_Bool | T_Nil -> (R_Bool, to_bool current_env typed_init)
           | _ -> (R_Value, to_value current_env typed_init)
         in
         let next_env = add_binding current_env elisp_name ocaml_name repr in
@@ -334,7 +334,7 @@ and translate_let_star env bindings body inferred_type =
 and translate_setq env pairs inferred_type =
   let target_repr =
     match inferred_type with
-    | T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
+    | InferredType.T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
     | _ -> R_Value
   in
   let assignments_code_list =
@@ -358,7 +358,7 @@ and translate_setq env pairs inferred_type =
     match List.last pairs with
     | None ->
         translate_expr env
-          (TypedAst.Atom { value = Value.Nil; inferred_type = T_Nil })
+          (TypedAst.Atom { value = Value.Nil; inferred_type = InferredType.T_Nil })
           target_repr
     | Some (_, v) -> translate_expr env v target_repr
   in
@@ -371,17 +371,17 @@ and translate_lambda env arg_spec body fun_type =
   let open InferredType in
   let inferred_arg_types_list =
     match fun_type with
-    | T_Function { arg_types = Some types; _ } -> types
+    | InferredType.T_Function { arg_types = Some types; _ } -> types
     | _ ->
         Printf.eprintf "Warning: Missing type info for lambda args\n";
         List.map
           (arg_spec.required @ List.map ~f:fst arg_spec.optional
           @ Option.to_list arg_spec.rest)
-          ~f:(fun _ -> T_Any)
+          ~f:(fun _ -> InferredType.T_Any)
   in
   let inferred_arg_types = Array.of_list inferred_arg_types_list in
   let inferred_return_type =
-    match fun_type with T_Function { return_type; _ } -> return_type | _ -> T_Any
+    match fun_type with InferredType.T_Function { return_type; _ } -> return_type | _ -> T_Any
   in
   let code = Buffer.create 256 in
   Buffer.add_string code "(Value.Function (fun runtime_args ->\n";
@@ -422,13 +422,13 @@ and translate_lambda env arg_spec body fun_type =
       let runtime_arg = sprintf "(List.nth_exn runtime_args %d)" idx in
       let repr, setup_code =
         match arg_type with
-        | T_Int ->
+        | InferredType.T_Int ->
             (R_Int, sprintf "let %s : int ref = ref (%s) in" ocaml_name
                       (unbox_int runtime_arg))
-        | T_Float ->
+        | InferredType.T_Float ->
             (R_Float, sprintf "let %s : float ref = ref (%s) in" ocaml_name
                         (unbox_float runtime_arg))
-        | T_Bool | T_Nil ->
+        | InferredType.T_Bool | T_Nil ->
             (R_Bool, sprintf "let %s : bool ref = ref (%s) in" ocaml_name
                        (unbox_bool runtime_arg))
         | _ ->
@@ -452,19 +452,19 @@ and translate_lambda env arg_spec body fun_type =
       let condition = sprintf "(num_runtime_args > %d)" idx in
       let repr, setup_code =
         match arg_type with
-        | T_Int ->
+        | InferredType.T_Int ->
             ( R_Int,
               sprintf
                 "let %s : int ref = ref (if %s then %s else %s) in"
                 ocaml_name condition (unbox_int runtime_arg_expr)
                 (unbox_int default_value_expr) )
-        | T_Float ->
+        | InferredType.T_Float ->
             ( R_Float,
               sprintf
                 "let %s : float ref = ref (if %s then %s else %s) in"
                 ocaml_name condition (unbox_float runtime_arg_expr)
                 (unbox_float default_value_expr) )
-        | T_Bool | T_Nil ->
+        | InferredType.T_Bool | T_Nil ->
             ( R_Bool,
               sprintf
                 "let %s : bool ref = ref (if %s then %s else %s) in"
@@ -501,14 +501,14 @@ and translate_lambda env arg_spec body fun_type =
 and translate_cond env clauses inferred_type =
   let target_repr =
     match inferred_type with
-    | T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
+    | InferredType.T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
     | _ -> R_Value
   in
   let rec build cls =
     match cls with
     | [] ->
         translate_expr env
-          (TypedAst.Atom { value = Value.Nil; inferred_type = T_Nil })
+          (TypedAst.Atom { value = Value.Nil; inferred_type = InferredType.T_Nil })
           target_repr
     | (typed_test, typed_body) :: rest ->
         let test_code = to_bool env typed_test in
@@ -528,31 +528,31 @@ and translate_funcall env func args inferred_type =
   (* Try optimized builtins first *)
   match func, args with
   | TypedAst.Atom { value = Value.Symbol { name = "+"; _ }; _ }, [ a; b ]
-    when [%compare.equal: InferredType.t] inferred_type T_Int ->
+    when [%compare.equal: InferredType.t] inferred_type InferredType.T_Int ->
       sprintf "(%s + %s)" (to_int env a) (to_int env b)
   | TypedAst.Atom { value = Value.Symbol { name = "-"; _ }; _ }, [ a; b ]
-    when [%compare.equal: InferredType.t] inferred_type T_Int ->
+    when [%compare.equal: InferredType.t] inferred_type InferredType.T_Int ->
       sprintf "(%s - %s)" (to_int env a) (to_int env b)
   | TypedAst.Atom { value = Value.Symbol { name = "*"; _ }; _ }, [ a; b ]
-    when [%compare.equal: InferredType.t] inferred_type T_Int ->
+    when [%compare.equal: InferredType.t] inferred_type InferredType.T_Int ->
       sprintf "(%s * %s)" (to_int env a) (to_int env b)
   | TypedAst.Atom { value = Value.Symbol { name = "/"; _ }; _ }, [ a; b ]
-    when [%compare.equal: InferredType.t] inferred_type T_Int ->
+    when [%compare.equal: InferredType.t] inferred_type InferredType.T_Int ->
       sprintf "(%s / %s)" (to_int env a) (to_int env b) (* Integer division *)
   | TypedAst.Atom { value = Value.Symbol { name = "eq"; _ }; _ }, [ a; b ]
-    when [%compare.equal: InferredType.t] inferred_type T_Bool ->
+    when [%compare.equal: InferredType.t] inferred_type InferredType.T_Bool ->
       sprintf "(Runtime.is_truthy (Runtime.builtin_eq [%s; %s]))"
         (to_value env a) (to_value env b) (* Eq needs Value.t *)
   | TypedAst.Atom { value = Value.Symbol { name = "car"; _ }; _ }, [ a ] ->
       let target_repr =
         match inferred_type with
-        | T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
+        | InferredType.T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
         | _ -> R_Value
       in
       let arg_code = to_value env a in
       let car_logic_code =
         sprintf
-          "(match %s with | Value.Cons { car; _ } -> !car | Value.Nil -> \
+          "(match %s with | Value.Cons { car; _ } -> car | Value.Nil -> \
            Value.Nil | other -> Runtime.type_error \"car\" \"cons cell or nil\" \
            other)"
           arg_code
@@ -574,7 +574,7 @@ and translate_generic_funcall env func args inferred_type =
   in
   let target_repr =
     match inferred_type with
-    | T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
+    | InferredType.T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
     | _ -> R_Value
   in
   match target_repr with
@@ -598,7 +598,7 @@ let translate_toplevel texprs final_env_types =
            let ocaml_name = generate_ocaml_var name in
            let repr =
              match ty with
-             | T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
+             | InferredType.T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool
              | _ -> R_Value
            in
            (name, { ocaml_name; repr })))
@@ -622,7 +622,7 @@ let translate_toplevel texprs final_env_types =
     | hd :: tl -> "let rec " ^ hd ^ (List.map tl ~f:(sprintf "\nand %s") |> String.concat)
   in
 
-  let run_body_code = translate_progn top_env !run_expressions T_Any in
+  let run_body_code = translate_progn top_env !run_expressions InferredType.T_Any in
 
   let env_export_entries =
     Map.to_alist top_env_map

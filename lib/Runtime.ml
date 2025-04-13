@@ -49,32 +49,32 @@ let is_truthy = Value.is_truthy
 
 let builtin_cons args =
   match args with
-  | [a; b] -> Value.Cons { car = ref a; cdr = ref b } (* Use ref directly *)
+  | [a; b] -> Value.Cons { car = a; cdr = b }
   | _ -> arity_error "cons" (sprintf "expected 2 arguments, got %d" (List.length args))
 
 let builtin_car args =
   match args with
-  | [Value.Cons { car; _ }] -> !car
+  | [Value.Cons { car; _ }] -> car
   | [Value.Nil] -> Value.Nil
   | [other] -> type_error "car" "cons cell or nil" other
   | _ -> arity_error "car" (sprintf "expected 1 argument, got %d" (List.length args))
 
 let builtin_cdr args =
    match args with
-  | [Value.Cons { cdr; _ }] -> !cdr
+  | [Value.Cons { cdr; _ }] -> cdr
   | [Value.Nil] -> Value.Nil
   | [other] -> type_error "cdr" "cons cell or nil" other
   | _ -> arity_error "cdr" (sprintf "expected 1 argument, got %d" (List.length args))
 
 let builtin_setcar args =
   match args with
-  | [Value.Cons cell; new_val] -> cell.car := new_val; new_val (* Use record field *)
+  | [Value.Cons cell; new_val] -> cell.car <- new_val; new_val (* Use record field *)
   | [not_cons; _] -> type_error "setcar" "cons cell" not_cons
   | _ -> arity_error "setcar" (sprintf "expected 2 arguments, got %d" (List.length args))
 
 let builtin_setcdr args =
    match args with
-  | [Value.Cons cell; new_val] -> cell.cdr := new_val; new_val (* Use record field *)
+  | [Value.Cons cell; new_val] -> cell.cdr <- new_val; new_val (* Use record field *)
   | [not_cons; _] -> type_error "setcdr" "cons cell" not_cons
   | _ -> arity_error "setcdr" (sprintf "expected 2 arguments, got %d" (List.length args))
 
@@ -150,7 +150,7 @@ let builtin_listp args =
   let rec is_list l =
     match l with
     | Value.Nil -> true
-    | Value.Cons { cdr; _ } -> is_list !cdr
+    | Value.Cons { cdr; _ } -> is_list cdr
     | _ -> false
   in
   if is_list (List.hd_exn args) then Value.T else Value.Nil
@@ -189,8 +189,8 @@ let rec value_to_sexp (v : Value.t) : Sexp.t = (* Removed semicolon *)
   | Value.Keyword k -> Sexp.Atom (":" ^ k)
   | Value.Cons { car; cdr } ->
       (* Handle list printing *)
-      let car_sexp = value_to_sexp !car in
-      let (cdr_sexps, final_cdr) = sexps_of_list_cdr !cdr in
+      let car_sexp = value_to_sexp car in
+      let (cdr_sexps, final_cdr) = sexps_of_list_cdr cdr in
       let all_sexps = car_sexp :: cdr_sexps in
       (match final_cdr with
        | Value.Nil -> Sexp.List all_sexps (* Proper list *)
@@ -208,8 +208,8 @@ and sexps_of_list_cdr (cdr_val : Value.t) : Sexp.t list * Value.t =
   match cdr_val with
   | Value.Nil -> ([], Value.Nil) (* Proper list end *)
   | Value.Cons { car; cdr } ->
-      let car_sexp = value_to_sexp !car in
-      let (rest_sexps, final_cdr) = sexps_of_list_cdr !cdr in
+      let car_sexp = value_to_sexp car in
+      let (rest_sexps, final_cdr) = sexps_of_list_cdr cdr in
       (car_sexp :: rest_sexps, final_cdr)
   | other -> ([], other) (* Improper list end *)
 
@@ -229,7 +229,7 @@ let rec sexp_to_value_internal (s : Sexp.t) : Value.t =
   | Sexp.List l -> list_to_value_internal (List.map l ~f:sexp_to_value_internal)
 and list_to_value_internal = function (* Helper *)
   | [] -> Value.Nil
-  | h :: t -> Value.Cons { car = ref h; cdr = ref (list_to_value_internal t) }
+  | h :: t -> Value.Cons { car = h; cdr = list_to_value_internal t }
 
 (* Use the internal version for converting Sexp input *)
 let sexp_to_value = sexp_to_value_internal
@@ -250,7 +250,7 @@ let value_list_to_sexp_list (code_value : Value.t) : Sexp.t list =
 let alist_to_value (alist : (string * Value.t) list) : Value.t =
   let value_pairs = List.map alist ~f:(fun (name, v) ->
       (* Create (sym . val) pair *)
-      Value.Cons { car = ref (Value.Symbol {name = name}); cdr = ref v }
+      Value.Cons { car = Value.Symbol {name = name}; cdr = v }
     )
   in
   (* Convert list of pairs into a Value.t list *)
@@ -333,15 +333,15 @@ let builtin_assoc args =
       let rec find_in_alist lst =
         match lst with
         | Value.Nil -> Value.Nil (* Not found *)
-        | Value.Cons { car = pair_ref; cdr = rest_ref } ->
-            (match !pair_ref with
-             | Value.Cons { car = item_key_ref; cdr = _ } ->
+        | Value.Cons { car = pair; cdr = rest } ->
+            (match pair with
+             | Value.Cons { car = item_key; cdr = _ } ->
                  (* Use 'equal' for comparison, as keys can be any type *)
-                 if [%compare.equal: Value.t] key !item_key_ref then
-                   !pair_ref (* Found the pair *)
+                 if [%compare.equal: Value.t] key item_key then
+                   pair (* Found the pair *)
                  else
-                   find_in_alist !rest_ref (* Check rest of the list *)
-             | _ -> find_in_alist !rest_ref (* Skip malformed pair *)
+                   find_in_alist rest (* Check rest of the list *)
+             | _ -> find_in_alist rest (* Skip malformed pair *)
             )
         | _ -> runtime_error "assoc" "Second argument must be a proper association list"
       in

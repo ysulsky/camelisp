@@ -70,8 +70,8 @@
       | Value.Symbol {name} -> lookup_variable env name
       (* Cons cell: Evaluate as form or function call *)
       | Value.Cons { car; cdr } ->
-          let head_val = eval env !car in (* Evaluate the head *)
-          eval_dispatch env head_val !cdr (* Dispatch based on head and cdr *)
+          let head_val = eval env car in (* Evaluate the head *)
+          eval_dispatch env head_val cdr (* Dispatch based on head and cdr *)
 
     and eval_dispatch (env : eval_env) (head_val : Value.t) (cdr_val : Value.t) : Value.t =
         match head_val with
@@ -144,8 +144,8 @@
       let evaluated_bindings_with_refs = List.map bindings_list ~f:(fun b_val ->
           match b_val with
           | Value.Symbol {name} -> (name, ref Value.Nil) (* Symbol only defaults to nil *)
-          (* ***** CORRECT PATTERN HERE ***** *)
-          | Value.Cons {car = ref (Value.Symbol {name=n}); cdr = ref init_list_val} ->
+          | Value.Cons {car = Value.Symbol {name=n};
+                        cdr = init_list_val} ->
               (match Value.value_to_list_opt init_list_val with
                | Some [init_form] -> let value = eval env init_form in (n, ref value)
                | _ -> failwithf "Malformed let binding (init list): %s" (!Value.to_string b_val) ())
@@ -168,7 +168,7 @@
           let name, init_form = match b_val with
             | Value.Symbol {name=n} -> (n, Value.Nil) (* Symbol only defaults to nil *)
             (* ***** CORRECT PATTERN HERE ***** *)
-            | Value.Cons {car = ref (Value.Symbol {name=n}); cdr = ref init_list_val} ->
+            | Value.Cons {car = Value.Symbol {name=n}; cdr = init_list_val} ->
                 (match Value.value_to_list_opt init_list_val with
                 | Some [i] -> (n, i)
                 | _ -> failwithf "Malformed let* binding (init list): %s" (!Value.to_string b_val) ())
@@ -193,7 +193,6 @@
             let (_ : Value.t) = set_variable env var_name value in (* Perform assignment *)
             process_pairs value rest (* Recurse with the assigned value *)
         | not_symbol :: _ -> failwithf "Malformed setq: expected symbol, got %s" (!Value.to_string not_symbol) ()
-        | _ -> failwith "Malformed setq: structure error" (* Should be unreachable *)
       in
       process_pairs Value.Nil pairs (* Start with Nil, process pairs *)
 
@@ -237,7 +236,7 @@
       | [] -> Value.Nil (* No clauses, result is nil *)
       | clause_val :: rest_clauses ->
           match clause_val with
-          | Value.Cons { car=ref test_form; cdr=ref body_list_val } ->
+          | Value.Cons { car=test_form; cdr=body_list_val } ->
               let test_result = eval env test_form in
               if Value.is_truthy test_result then
                 (* Condition is true *)
@@ -260,5 +259,3 @@
       (* Start with an empty local environment (only globals from Runtime) *)
       let initial_env : eval_env = [] in
       eval_progn initial_env values
-
-    
