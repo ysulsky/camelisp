@@ -27,8 +27,10 @@ let last_loaded_environment : (string * Value.t) list option ref = ref None
 (* --- Compilation Flags --- *)
 let keep_compile_artifacts_p = ref false
 let keep_compile_artifacts () = !keep_compile_artifacts_p
-let compile_verbose_p = ref false
-let is_compile_verbose () = !compile_verbose_p
+
+let compile_verbose_p = ref false (* Moved from Runtime.ml *)
+let is_compile_verbose () = !compile_verbose_p (* Accessor added *)
+
 
 (* Removed Callback registration mechanism *)
 (* --- End Shared State --- *)
@@ -55,25 +57,27 @@ let compile_and_load_string (ocaml_code : string) : (string * Value.t) list =
 
     (* 2. Compile the .ml to .cmx/.o (native object file) *)
     let include_flags = List.map include_paths ~f:(sprintf "-I %s") |> String.concat ~sep:" " in
-    (* Use ocamlopt -c. Ensure scaml package is included for interfaces *)
-    (* Corrected: Removed the "-o %s" argument, as -c determines output names *)
+    (* Use ocamlopt -c. Ensure scaml package is included for interfaces. Keep -linkpkg here. *)
     let compile_native_cmd =
       sprintf "%s %s -package core,scaml -linkpkg -c %s %s"
         ocamlfind_path ocamlopt_path include_flags ml_filename
     in
-    (* Printf.printf "Executing: %s\n%!" compile_native_cmd; *)
+    (* Print command if verbose *)
+    if is_compile_verbose () then printf "Executing Compile: %s\n%!" compile_native_cmd;
     if Sys_unix.command compile_native_cmd <> 0 then
       raise (Compilation_error (sprintf "OCaml native compilation failed for %s. Command: %s" ml_filename compile_native_cmd));
 
     (* 3. Link the .cmx/.o into a .cmxs (native shared library) *)
     let lib_flags = List.map library_paths ~f:(sprintf "-I %s") |> String.concat ~sep:" " in
     (* Use ocamlopt -shared. Link against scaml package *)
+    (* Corrected: Removed -linkpkg from the linking command *)
     let link_native_cmd =
-      sprintf "%s %s -package core,scaml -linkpkg -shared %s -o %s %s"
+      sprintf "%s %s -package core,scaml -shared %s -o %s %s"
         ocamlfind_path ocamlopt_path lib_flags cmxs_filename cmx_filename
         (* We provide the .cmx, ocamlopt finds the corresponding .o *)
     in
-    (* Printf.printf "Executing: %s\n%!" link_native_cmd; *)
+    (* Print command if verbose *)
+    if is_compile_verbose () then printf "Executing Link: %s\n%!" link_native_cmd;
     if Sys_unix.command link_native_cmd <> 0 then
        raise (Compilation_error (sprintf "OCaml native linking failed for %s. Command: %s" ml_filename link_native_cmd));
 

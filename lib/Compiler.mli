@@ -9,10 +9,12 @@ val last_loaded_environment : (string * Value.t) list option ref
 (** Compiles and loads OCaml code string, returning the environment. *)
 val compile_and_load_string : string -> (string * Value.t) list
 
-(** Accessor for the flag determining whether to keep temporary compilation files. *)
+(** Check if compilation artifacts should be kept. *)
 val keep_compile_artifacts : unit -> bool
+(** Reference holding the keep_compile_artifacts flag. *)
 val keep_compile_artifacts_p : bool ref
 
-(** Accessor for the flag determining whether to show verbose compilation output. *)
+(** Check if verbose compilation output is enabled. *)
 val is_compile_verbose : unit -> bool
+(** Reference holding the compile_verbose flag. *)
 val compile_verbose_p : bool ref
