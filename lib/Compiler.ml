@@ -23,6 +23,11 @@ exception Compilation_error of string
 (* Define a shared ref accessible by both the compiler and dynamically loaded modules. *)
 (* The loaded module will mutate this ref to pass back its environment. *)
 let last_loaded_environment : (string * Value.t) list option ref = ref None
+let unique_generated_module =
+    let num_generated = ref 0 in
+    fun () ->
+      incr num_generated;
+      sprintf "scaml_generated_%d" !num_generated
 
 (* --- Compilation Flags --- *)
 let keep_compile_artifacts_p = ref false
@@ -39,7 +44,7 @@ let is_compile_verbose () = !compile_verbose_p (* Accessor added *)
 (** Compiles an OCaml source string to a .cmxs file and loads it *)
 (* Modified: Compiles to native code (.cmxs) and returns env list *)
 let compile_and_load_string (ocaml_code : string) : (string * Value.t) list =
-  let ml_filename = Filename_unix.temp_file "scaml_generated_" ".ml" in
+  let ml_filename = Filename_unix.temp_file (unique_generated_module ()) ".ml" in
   let base_filename = Filename.chop_extension ml_filename in
   (* Native compilation outputs *)
   let cmx_filename = base_filename ^ ".cmx" in
