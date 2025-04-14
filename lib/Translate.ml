@@ -682,10 +682,10 @@ let translate_toplevel texprs final_env_types needs_boxing_set =
                     in
                     Buffer.add_string body_buffer assign_code;
                     (* Update the Hashtbl for the final environment *)
-                    (* Need to get the updated value from the ref *)
-                    let updated_ocaml_value = sprintf "!%s" ocaml_name in
-                    let boxed_update_val = box_value updated_ocaml_value base_repr in
-                    Buffer.add_string body_buffer (sprintf "\nHashtbl.set module_env_tbl ~key:%S ~data:%s;\n" sym_name boxed_update_val)
+                    let current_val_code = sprintf "!%s" ocaml_name in
+                    (* Corrected: Use needs_boxing flag to determine if value is already Value.t *)
+                    let value_for_tbl = if needs_boxing then current_val_code else box_value current_val_code base_repr in
+                    Buffer.add_string body_buffer (sprintf "\nHashtbl.set module_env_tbl ~key:%S ~data:%s;\n" sym_name value_for_tbl)
 
               | None ->
                   (* New variable definition *)
@@ -697,6 +697,7 @@ let translate_toplevel texprs final_env_types needs_boxing_set =
                   let ocaml_name = generate_ocaml_var sym_name in
 
                   (* Add binding to tracking map for subsequent expressions *)
+                  (* Corrected: Use value_base_repr *)
                   top_level_var_map := Map.set !top_level_var_map ~key:sym_name ~data:{ ocaml_name; repr=value_base_repr; is_mutated; needs_boxing };
 
                   (* Generate OCaml let binding (will always be a ref now) *)
@@ -710,9 +711,10 @@ let translate_toplevel texprs final_env_types needs_boxing_set =
                   let keyword_space = if String.is_empty binding_keyword then "" else " " in
                   Buffer.add_string body_buffer (sprintf "let %s %s =%s%s (%s) in\n" ocaml_name ocaml_type_annot keyword_space binding_keyword value_code);
                   (* Add to the Hashtbl for the final environment *)
-                  let value_to_box = sprintf "!%s" ocaml_name in (* Always read from ref *)
-                  let boxed_val = box_value value_to_box value_base_repr in
-                  Buffer.add_string body_buffer (sprintf "Hashtbl.set module_env_tbl ~key:%S ~data:%s;\n" sym_name boxed_val)
+                  let current_val_code = sprintf "!%s" ocaml_name in (* Always read from ref *)
+                   (* Corrected: Use needs_boxing flag and value_base_repr *)
+                  let value_for_tbl = if needs_boxing then current_val_code else box_value current_val_code value_base_repr in
+                  Buffer.add_string body_buffer (sprintf "Hashtbl.set module_env_tbl ~key:%S ~data:%s;\n" sym_name value_for_tbl)
             )
       | _ ->
           (* Other top-level expressions (e.g., function calls for side effects) *)
