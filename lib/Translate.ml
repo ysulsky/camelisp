@@ -39,7 +39,7 @@ module Translate_quote = struct
 end
 
 (* --- Environment --- *)
-type var_repr = R_Value | R_Int | R_Float | R_Bool [@@deriving sexp_of]
+type var_repr = R_Value | R_Int | R_Float | R_Bool [@@deriving sexp_of, equal]
 
 (* Modified: env_entry now includes is_mutated and needs_boxing *)
 type env_entry = {
@@ -175,8 +175,9 @@ and translate_node env needs_boxing_set texpr : string * var_repr =
                   (* The representation of the *value obtained* depends on boxing *)
                   let actual_repr = if needs_boxing then R_Value else repr in
                   (access_code, actual_repr)
-              (* Globals: Error if accessed directly in compiled code *)
-              | None -> failwithf "Translate Error: Undefined variable '%s' accessed." name ()
+              (* Globals / Built-ins: Look up via Runtime *)
+              (* Corrected: Fallback to runtime lookup instead of erroring *)
+              | None -> (sprintf "(Runtime.lookup_variable %S)" name, R_Value)
               )
           | _ -> failwith "Type mismatch: T_Symbol but not Value.Symbol"
          )
@@ -192,7 +193,8 @@ and translate_node env needs_boxing_set texpr : string * var_repr =
                   let use_ref = is_mutated || needs_boxing in
                   let access_code = if use_ref then sprintf "!%s" ocaml_name else ocaml_name in
                   (access_code, R_Value) (* Always R_Value *)
-               | None -> failwithf "Translate Error: Undefined variable '%s' accessed." name ()
+               (* Corrected: Fallback to runtime lookup instead of erroring *)
+               | None -> (sprintf "(Runtime.lookup_variable %S)" name, R_Value)
              )
           (* Atom itself is the complex value (e.g., literal vector) *)
           | _ -> (Translate_quote.translate_quoted_data value, R_Value)
@@ -506,8 +508,10 @@ and translate_lambda env needs_boxing_set arg_spec body fun_type =
       inner_env_ref := add_binding !inner_env_ref name ocaml_name R_Value is_mutated needs_boxing); (* Base repr is R_Value *)
 
   Buffer.add_buffer code arg_bindings_code; (* Add bindings setup *)
-  let body_code, _ = translate_progn_sequence !inner_env_ref needs_boxing_set body inferred_return_type in
-  Buffer.add_string code (sprintf "    %s\n))" body_code); (* Add body *)
+  (* Corrected: Translate body and box result if necessary *)
+  let body_code_raw, body_repr = translate_progn_sequence !inner_env_ref needs_boxing_set body inferred_return_type in
+  let final_body_code = box_value body_code_raw body_repr in (* Box if needed *)
+  Buffer.add_string code (sprintf "    %s\n))" final_body_code); (* Add potentially boxed body code *)
   Buffer.contents code
 
 
@@ -532,20 +536,58 @@ and translate_funcall env needs_boxing_set func args inferred_type : string * va
   (* Determine target repr first *)
    (* Qualify all T_* constructors *)
   let target_repr = match inferred_type with | InferredType.T_Int -> R_Int | InferredType.T_Float -> R_Float | InferredType.T_Bool | InferredType.T_Nil -> R_Bool | _ -> R_Value in
-  (* Translate function and args *)
-  let func_code = to_value env needs_boxing_set func in
-  let arg_codes_value = List.map args ~f:(to_value env needs_boxing_set) in
-  (* Generate the Runtime call (always returns Value.t) *)
-  let call_code = sprintf "(Runtime.apply_function (%s) [%s])" func_code (String.concat ~sep:"; " arg_codes_value) in
-  (* Convert result to target representation *)
-  let final_code =
-      match target_repr with
-      | R_Int -> unbox_int call_code
-      | R_Float -> unbox_float call_code
-      | R_Bool -> unbox_bool call_code
-      | R_Value -> call_code
+
+  (* --- Try Optimized Builtins First --- *)
+  let ( = ) = equal_var_repr in
+  let optimized_result =
+      match func, args with
+      (* Arithmetic: Check inferred type of the *call* *)
+      | TypedAst.Atom { value = Value.Symbol { name = "+"; _ }; _ }, [ a; b ] when target_repr = R_Int ->
+          Some (sprintf "(%s + %s)" (to_int env needs_boxing_set a) (to_int env needs_boxing_set b))
+      | TypedAst.Atom { value = Value.Symbol { name = "-"; _ }; _ }, [ a; b ] when target_repr = R_Int ->
+          Some (sprintf "(%s - %s)" (to_int env needs_boxing_set a) (to_int env needs_boxing_set b))
+      | TypedAst.Atom { value = Value.Symbol { name = "*"; _ }; _ }, [ a; b ] when target_repr = R_Int ->
+          Some (sprintf "(%s * %s)" (to_int env needs_boxing_set a) (to_int env needs_boxing_set b))
+      | TypedAst.Atom { value = Value.Symbol { name = "/"; _ }; _ }, [ a; b ] when target_repr = R_Int ->
+          Some (sprintf "(%s / %s)" (to_int env needs_boxing_set a) (to_int env needs_boxing_set b))
+      (* Add Float versions if needed *)
+      (* Predicates (target_repr is R_Bool) *)
+      | TypedAst.Atom { value = Value.Symbol { name = "integerp"; _ }; _ }, [ a ] when target_repr = R_Bool ->
+          Some (sprintf "(match %s with Value.Int _ -> true | _ -> false)" (to_value env needs_boxing_set a))
+      | TypedAst.Atom { value = Value.Symbol { name = "consp"; _ }; _ }, [ a ] when target_repr = R_Bool ->
+          Some (sprintf "(match %s with Value.Cons _ -> true | _ -> false)" (to_value env needs_boxing_set a))
+      (* Add other predicates *)
+      (* Equality (target_repr is R_Bool) *)
+      | TypedAst.Atom { value = Value.Symbol { name = "eq"; _ }; _ }, [ a; b ] when target_repr = R_Bool ->
+          Some (sprintf "(Runtime.is_truthy (Runtime.builtin_eq [%s; %s]))" (to_value env needs_boxing_set a) (to_value env needs_boxing_set b))
+      | TypedAst.Atom { value = Value.Symbol { name = "equal"; _ }; _ }, [ a; b ] when target_repr = R_Bool ->
+          Some (sprintf "(Runtime.is_truthy (Runtime.builtin_equal [%s; %s]))" (to_value env needs_boxing_set a) (to_value env needs_boxing_set b))
+      (* List ops: cons always returns R_Value *)
+      | TypedAst.Atom { value = Value.Symbol { name = "cons"; _ }; _ }, [ a; b ] when target_repr = R_Value ->
+          Some (sprintf "(Value.Cons { car = %s; cdr = %s })" (to_value env needs_boxing_set a) (to_value env needs_boxing_set b))
+      (* car/cdr are tricky: result type depends on analysis *)
+      (* Keep car/cdr in generic path for now unless we add specific type checks *)
+      | _ -> None
   in
-  (final_code, target_repr)
+
+  match optimized_result with
+  | Some code -> (code, target_repr) (* Return optimized code and the target repr *)
+  | None ->
+      (* --- Generic Function Call --- *)
+      let func_code = to_value env needs_boxing_set func in
+      let arg_codes_value = List.map args ~f:(to_value env needs_boxing_set) in
+      (* Generate the Runtime call (always returns Value.t) *)
+      let call_code = sprintf "(Runtime.apply_function (%s) [%s])" func_code (String.concat ~sep:"; " arg_codes_value) in
+      (* Convert result to target representation *)
+      let final_code =
+          match target_repr with
+          | R_Int -> unbox_int call_code
+          | R_Float -> unbox_float call_code
+          | R_Bool -> unbox_bool call_code
+          | R_Value -> call_code
+      in
+      (final_code, target_repr)
+
 
 (* --- Top Level Translation --- *)
 (* Modified: Refactored to handle top-level setq and build env *)
