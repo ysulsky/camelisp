@@ -17,20 +17,22 @@ module Translate = Scaml.Translate
 (* This function now takes Value.t list (representing quoted code) *)
 let scaml_compile_impl (code_list : Value.t list) : (string * Value.t) list =
   try
-     (* 1. Analyze - Needs to take Value.t list *)
-     let typed_asts, final_env_types = Analyze.analyze_toplevel code_list in
-     (* 2. Translate *)
-     let ocaml_code = Translate.translate_toplevel typed_asts final_env_types in
+     (* 1. Analyze - Captures TASTs, final env types, and vars needing boxing *)
+     let typed_asts, final_env_types, needs_boxing_set = Analyze.analyze_toplevel code_list in
+
+     (* 2. Translate - Pass boxing information *)
+     (* TODO: Update Translate.translate_toplevel signature to accept needs_boxing_set *)
+     let ocaml_code = Translate.translate_toplevel typed_asts final_env_types needs_boxing_set in
 
      (* Check verbose flag and print generated code if enabled *)
      if Runtime.is_compile_verbose () then (
         printf "\n--- Generated OCaml Code ---\n%s\n--------------------------\n%!" ocaml_code;
      );
 
-     (* 3. Compile and Load *)
-     let _, get_env_func = Compiler.compile_and_load_string ocaml_code in
-     (* 4. Get environment *)
-     get_env_func ()
+     (* 3. Compile and Load - Now returns only one function *)
+     let execute_and_get_env_func = Compiler.compile_and_load_string ocaml_code in
+     (* 4. Execute the compiled code and get the environment *)
+     execute_and_get_env_func () (* Call the function to get the alist *)
   with
    (* Propagate errors, potentially wrapping them *)
    | Compiler.Compilation_error msg -> failwith ("Compilation Error: " ^ msg)

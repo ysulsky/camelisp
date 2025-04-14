@@ -16,7 +16,7 @@ module TypedAst = struct
   type binding_info = {
     initializer_ast : t; (* The TAST node for the initializer *)
     is_mutated : bool; (* Flag: True if setq modifies this var in scope *)
-    (* TODO: Add inferred_repr later based on type change analysis *)
+    (* needs_boxing flag removed, analysis pass will return this info separately *)
   }
   (* TAST definition *)
   and t =
@@ -367,6 +367,150 @@ let rec check_mutations (ast: TypedAst.t) (candidates: String.Set.t) : String.Se
         (* We could check for mutations of *global* variables here if needed, *)
         (* but the current `check_mutations` focuses on lexical `candidates`. *)
         String.Set.empty
+
+
+(* --- Type Change Analysis Helpers --- *)
+
+(** Checks if two inferred types are compatible for assignment without boxing.
+    Uses a strict definition: must be same base type or involve Any/Unknown/Var.
+    Unions are compatible if the assigned type is compatible with any member. *)
+let rec are_types_compatible (t_var: InferredType.t) (t_assigned: InferredType.t) : bool =
+  let open InferredType in
+  match (t_var, t_assigned) with
+  (* Allow Any/Unknown/Var to be compatible with anything *)
+  | T_Any, _ | _, T_Any | T_Unknown, _ | _, T_Unknown | T_Var _, _ | _, T_Var _ -> true
+  (* Check for same base type *)
+  | T_Nil, T_Nil -> true
+  | T_Bool, T_Bool -> true
+  | T_Int, T_Int -> true
+  | T_Float, T_Float -> true
+  | T_Char, T_Char -> true
+  | T_String, T_String -> true
+  | T_Symbol, T_Symbol -> true
+  | T_Keyword, T_Keyword -> true
+  (* TODO: Refine structural type compatibility? *)
+  | T_Cons _, T_Cons _ -> true (* Assume compatible for now *)
+  | T_Vector _, T_Vector _ -> true (* Assume compatible for now *)
+  | T_Function _, T_Function _ -> true (* Assume compatible for now *)
+  (* Handle Unions *)
+  (* If var is a union, assigned must be compatible with at least one member *)
+  | T_Union s1, t2 -> Set.exists s1 ~f:(fun member_t1 -> are_types_compatible member_t1 t2)
+  (* If assigned is a union, it must be compatible with the var type *)
+  (* (which means all members of assigned union must be compatible if var is concrete, *)
+  (* or at least one member if var is also a union - handled by previous case) *)
+  | t1, T_Union s2 -> Set.for_all s2 ~f:(fun member_t2 -> are_types_compatible t1 member_t2)
+  (* Otherwise, incompatible *)
+  | _, _ -> false
+
+(** Recursively traverses the AST to find variables that are assigned
+    incompatible types, indicating they need boxing.
+    [var_initial_types]: Map from var name to its initial inferred type in the current scope. *)
+let rec find_boxing_violations (ast: TypedAst.t) (var_initial_types: InferredType.t String.Map.t) : String.Set.t =
+  match ast with
+  | TypedAst.Atom _ | TypedAst.Quote _ -> String.Set.empty
+  | TypedAst.Setq { pairs; _ } ->
+      List.fold pairs ~init:String.Set.empty ~f:(fun acc (name, value_ast) ->
+          let violations_in_value = find_boxing_violations value_ast var_initial_types in
+          let current_violation =
+            match Map.find var_initial_types name with
+            | None -> String.Set.empty (* Global or undefined, ignore for boxing violation *)
+            | Some initial_type ->
+                let assigned_type = TypedAst.get_type value_ast in
+                if are_types_compatible initial_type assigned_type then
+                  String.Set.empty
+                else
+                  ( (* Debug print *)
+                    (* printf "Boxing violation: var=%s, initial=%s, assigned=%s\n%!" name (InferredType.to_string initial_type) (InferredType.to_string assigned_type); *)
+                    String.Set.singleton name (* Type violation! *)
+                  )
+          in
+          String.Set.union_list [acc; violations_in_value; current_violation]
+        )
+  | TypedAst.Progn { forms; _ } ->
+      List.fold forms ~init:String.Set.empty ~f:(fun acc form ->
+          Set.union acc (find_boxing_violations form var_initial_types)
+        )
+  | TypedAst.If { cond; then_branch; else_branch; _ } ->
+      let cond_v = find_boxing_violations cond var_initial_types in
+      let then_v = find_boxing_violations then_branch var_initial_types in
+      let else_v = Option.value_map else_branch ~default:String.Set.empty ~f:(fun e -> find_boxing_violations e var_initial_types) in
+      String.Set.union_list [cond_v; then_v; else_v]
+  | TypedAst.Let { bindings; body; _ } ->
+      (* Get initial types for new bindings *)
+      let inner_var_types =
+        List.fold bindings ~init:var_initial_types ~f:(fun acc_types (name, b_info) ->
+            Map.set acc_types ~key:name ~data:(TypedAst.get_type b_info.initializer_ast)
+          )
+      in
+      (* Check initializers (use outer scope's types) *)
+      let init_violations = List.fold bindings ~init:String.Set.empty ~f:(fun acc (_, b_info) ->
+            Set.union acc (find_boxing_violations b_info.initializer_ast var_initial_types)
+          )
+      in
+      (* Check body (use inner scope's types) *)
+      let body_violations = List.fold body ~init:String.Set.empty ~f:(fun acc form ->
+            Set.union acc (find_boxing_violations form inner_var_types)
+          )
+      in
+      Set.union init_violations body_violations
+  | TypedAst.LetStar { bindings; body; _ } ->
+      (* Process sequentially, updating initial types map *)
+      let init_violations, final_var_types =
+        List.fold bindings ~init:(String.Set.empty, var_initial_types)
+          ~f:(fun (acc_violations, current_types) (name, b_info) ->
+              (* Check initializer with current types *)
+              let init_v = find_boxing_violations b_info.initializer_ast current_types in
+              (* Add new binding's initial type for next step *)
+              let next_types = Map.set current_types ~key:name ~data:(TypedAst.get_type b_info.initializer_ast) in
+              (Set.union acc_violations init_v, next_types)
+            )
+      in
+      (* Check body using types from end of bindings *)
+      let body_violations = List.fold body ~init:String.Set.empty ~f:(fun acc form ->
+            Set.union acc (find_boxing_violations form final_var_types)
+          )
+      in
+      Set.union init_violations body_violations
+  | TypedAst.Lambda { args; body; _ } ->
+       (* Get initial types for arguments (treat as Any for now, or use inferred?) *)
+       (* Using Any simplifies things, as we only care about violations *within* the body *)
+       let inner_var_types =
+         let arg_names = args.required @ (List.map args.optional ~f:fst) @ (Option.to_list args.rest) in
+         List.fold arg_names ~init:var_initial_types ~f:(fun acc_types name ->
+             Map.set acc_types ~key:name ~data:InferredType.T_Any (* Assume Any initial type for args *)
+           )
+       in
+       (* Check body using inner scope's types *)
+       List.fold body ~init:String.Set.empty ~f:(fun acc form ->
+         Set.union acc (find_boxing_violations form inner_var_types)
+       )
+  | TypedAst.Cond { clauses; _ } ->
+      List.fold clauses ~init:String.Set.empty ~f:(fun acc (test_expr, body_exprs) ->
+          let test_v = find_boxing_violations test_expr var_initial_types in
+          let body_v = List.fold body_exprs ~init:String.Set.empty ~f:(fun acc' expr ->
+              Set.union acc' (find_boxing_violations expr var_initial_types)
+            )
+          in
+          String.Set.union_list [acc; test_v; body_v]
+        )
+  | TypedAst.Funcall { func; args; _ } ->
+      let func_v = find_boxing_violations func var_initial_types in
+      let args_v = List.fold args ~init:String.Set.empty ~f:(fun acc arg ->
+          Set.union acc (find_boxing_violations arg var_initial_types)
+        )
+      in
+      Set.union func_v args_v
+  | TypedAst.Defun { args; body; _ } ->
+      (* Analyze body, similar to Lambda *)
+      let inner_var_types =
+        let arg_names = args.required @ (List.map args.optional ~f:fst) @ (Option.to_list args.rest) in
+        List.fold arg_names ~init:var_initial_types ~f:(fun acc_types name ->
+            Map.set acc_types ~key:name ~data:InferredType.T_Any
+          )
+      in
+      List.fold body ~init:String.Set.empty ~f:(fun acc form ->
+        Set.union acc (find_boxing_violations form inner_var_types)
+      )
 
 
 (* --- Helper to analyze progn-like body --- *)
@@ -749,12 +893,13 @@ and analyze_funcall env func_val args_values : TypedAst.t * substitution =
 
 
 (* --- Top Level Analysis --- *)
-(* Takes Value.t list *)
+(* Modified return type to include set of vars needing boxing *)
 let analyze_toplevel (values : Value.t list)
-    : TypedAst.t list * (string * InferredType.t) list =
+    : TypedAst.t list * (string * InferredType.t) list * String.Set.t =
   let final_env_map = ref String.Map.empty in
   let final_subst = ref Subst.empty in
 
+  (* Pass 1: Type inference and substitution application *)
   let typed_asts = List.map values ~f:(fun value ->
       let current_env = Map.to_alist !final_env_map in
       let typed_ast, subst = analyze_expr current_env value in
@@ -800,5 +945,14 @@ let analyze_toplevel (values : Value.t list)
     | TypedAst.Funcall ({ inferred_type=t; func; args; _ }) -> TypedAst.Funcall { func=final_apply func; args=List.map args ~f:final_apply; inferred_type=apply_t t }
   in
   let final_tasts = List.map typed_asts ~f:final_apply in
-  (final_tasts, Map.to_alist !final_env_map)
+  let final_env_alist = Map.to_alist !final_env_map in
+
+  (* Pass 2: Type Change Analysis *)
+  let initial_var_types = String.Map.of_alist_exn final_env_alist in
+  let needs_boxing_set = List.fold final_tasts ~init:String.Set.empty ~f:(fun acc tast ->
+      Set.union acc (find_boxing_violations tast initial_var_types)
+    )
+  in
+
+  (final_tasts, final_env_alist, needs_boxing_set) (* Return TASTs, final env types, and set of vars needing boxing *)
 
