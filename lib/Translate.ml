@@ -689,30 +689,28 @@ let translate_toplevel texprs final_env_types needs_boxing_set =
 
               | None ->
                   (* New variable definition *)
-                  (* TODO: Mutation analysis for top-level vars needs lookahead. Assume immutable for now unless boxed. *)
-                  let is_mutated = false in
+                  (* Corrected: Assume new top-level setq vars are mutable *)
+                  let is_mutated = true in
                   let needs_boxing = value_needs_boxing in
                   let final_repr = value_final_repr in
-                  let use_ref = is_mutated || needs_boxing in
+                  let use_ref = is_mutated || needs_boxing in (* Will always be true now *)
                   let ocaml_name = generate_ocaml_var sym_name in
 
                   (* Add binding to tracking map for subsequent expressions *)
-                  (* Corrected: Use value_base_repr *)
                   top_level_var_map := Map.set !top_level_var_map ~key:sym_name ~data:{ ocaml_name; repr=value_base_repr; is_mutated; needs_boxing };
 
-                  (* Generate OCaml let binding *)
+                  (* Generate OCaml let binding (will always be a ref now) *)
                   let ocaml_type_annot, binding_keyword =
                      match final_repr, use_ref with
                      | R_Int, true   -> (": int ref", "ref") | R_Float, true -> (": float ref", "ref")
                      | R_Bool, true  -> (": bool ref", "ref") | R_Value, true -> (": Value.t ref", "ref")
-                     | R_Int, false  -> (": int", "") | R_Float, false-> (": float", "")
-                     | R_Bool, false -> (": bool", "") | R_Value, false-> (": Value.t", "")
+                     | R_Int, false  -> (": int", "") | R_Float, false-> (": float", "") (* Unreachable *)
+                     | R_Bool, false -> (": bool", "") | R_Value, false-> (": Value.t", "") (* Unreachable *)
                   in
                   let keyword_space = if String.is_empty binding_keyword then "" else " " in
                   Buffer.add_string body_buffer (sprintf "let %s %s =%s%s (%s) in\n" ocaml_name ocaml_type_annot keyword_space binding_keyword value_code);
                   (* Add to the Hashtbl for the final environment *)
-                  let value_to_box = if use_ref then sprintf "!%s" ocaml_name else ocaml_name in
-                  (* Corrected: Use value_base_repr *)
+                  let value_to_box = sprintf "!%s" ocaml_name in (* Always read from ref *)
                   let boxed_val = box_value value_to_box value_base_repr in
                   Buffer.add_string body_buffer (sprintf "Hashtbl.set module_env_tbl ~key:%S ~data:%s;\n" sym_name boxed_val)
             )
