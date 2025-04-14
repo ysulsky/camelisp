@@ -260,18 +260,19 @@ and translate_progn_sequence env needs_boxing_set forms inferred_type : string *
        (code, target_repr)
    | [ last ] -> translate_node env needs_boxing_set last
    | _ ->
-       (* Translate all but the last form for side effects only (target R_Value) *)
+       (* Translate all but the last form for side effects only *)
        let side_effect_forms = List.drop_last_exn forms in
        let side_effect_codes = List.map side_effect_forms ~f:(fun expr ->
-           let code, _ = translate_node env needs_boxing_set expr in
-           sprintf "let (_ : _) = %s in ()" code (* Evaluate and discard *)
+           (* Corrected: Translate to Value.t and use ignore *)
+           let code = to_value env needs_boxing_set expr in
+           sprintf "ignore (%s : Value.t)" code
          )
        in
        (* Translate the last form *)
        let last_form = List.last_exn forms in
        let last_code, last_repr = translate_node env needs_boxing_set last_form in
-       (* Combine *)
-       let final_code = String.concat ~sep:"\n  " (side_effect_codes @ [last_code]) in
+       (* Combine with semicolons *)
+       let final_code = String.concat ~sep:";\n  " (side_effect_codes @ [last_code]) in
        (final_code, last_repr) (* Return code and repr of the *last* expression *)
 
 
@@ -604,128 +605,160 @@ and translate_funcall env needs_boxing_set func args inferred_type : string * va
 
 
 (* --- Top Level Translation --- *)
-(* Modified: Refactored to handle top-level setq and build env *)
+(* Modified: Implement 2-pass approach for top-level vars *)
 let translate_toplevel texprs final_env_types needs_boxing_set =
   let body_buffer = Buffer.create 1024 in (* Buffer for the generated function body *)
-  (* Map to track OCaml names and info for locally defined top-level vars *)
-  let top_level_var_map = ref String.Map.empty in
-  (* Convert final_env_types list to map for efficient lookup *)
-  let initial_types_map = String.Map.of_alist_exn final_env_types in
+  let top_level_var_map = ref String.Map.empty in (* Tracks locally defined top-level OCaml vars *)
+  let initial_types_map = String.Map.of_alist_exn final_env_types in (* Initial types from Analyze *)
+  let definitions_buffer = Buffer.create 512 in (* Buffer for OCaml let bindings *)
+  let initial_env_set_buffer = Buffer.create 256 in (* Buffer for initial Hashtbl.set *)
 
-  (* Add definitions (defun) first *)
-  let definitions = List.filter texprs ~f:(function TypedAst.Defun _ -> true | _ -> false) in
-  List.iter definitions ~f:(fun def_texpr ->
-      match def_texpr with
-      | TypedAst.Defun { name; args; body; fun_type; _ } ->
-          (* Corrected: Use initial_types_map *)
-          let initial_type_opt = Map.find initial_types_map name in
-          (* Qualify all T_* constructors *)
-          let base_repr = match initial_type_opt with Some(InferredType.T_Int) -> R_Int | Some(InferredType.T_Float) -> R_Float | Some(InferredType.T_Bool | InferredType.T_Nil) -> R_Bool | _ -> R_Value in
-          let is_mutated = true (* Defun is always mutable *) in
-          let needs_boxing = Set.mem needs_boxing_set name in
-          let ocaml_name = generate_ocaml_var name in
-
-          (* Add to tracking map *)
-          top_level_var_map := Map.set !top_level_var_map ~key:name ~data:{ ocaml_name; repr = base_repr; is_mutated; needs_boxing };
-
-          (* Translate lambda body (pass current top_level_var_map as env) *)
-          let lambda_code = translate_lambda !top_level_var_map needs_boxing_set args body fun_type in
-          (* Generate OCaml code for the ref definition *)
-          Buffer.add_string body_buffer (sprintf "let %s : Value.t ref = ref (%s) in\n" ocaml_name lambda_code)
-      | _ -> () (* Should not happen *)
+  (* Pass 1: Collect all top-level definitions (defun, first setq) and populate top_level_var_map *)
+  List.iter texprs ~f:(fun texpr ->
+      match texpr with
+      | TypedAst.Defun { name; _ } ->
+          if not (Map.mem !top_level_var_map name) then
+            let initial_type_opt = Map.find initial_types_map name in
+            let base_repr = match initial_type_opt with Some(InferredType.T_Int) -> R_Int | Some(InferredType.T_Float) -> R_Float | Some(InferredType.T_Bool | InferredType.T_Nil) -> R_Bool | _ -> R_Value in
+            let is_mutated = true in (* Defun is always mutable *)
+            let needs_boxing = Set.mem needs_boxing_set name in
+            let ocaml_name = generate_ocaml_var name in
+            top_level_var_map := Map.set !top_level_var_map ~key:name ~data:{ ocaml_name; repr = base_repr; is_mutated; needs_boxing };
+      | TypedAst.Setq { pairs; _ } ->
+          List.iter pairs ~f:(fun (sym_name, typed_value) ->
+              if not (Map.mem !top_level_var_map sym_name) then
+                let value_ast_type = TypedAst.get_type typed_value in
+                let value_base_repr = match value_ast_type with | InferredType.T_Int -> R_Int | InferredType.T_Float -> R_Float | InferredType.T_Bool | InferredType.T_Nil -> R_Bool | _ -> R_Value in
+                let is_mutated = true in (* Assume top-level setq vars are mutable *)
+                let needs_boxing = Set.mem needs_boxing_set sym_name in
+                let ocaml_name = generate_ocaml_var sym_name in
+                top_level_var_map := Map.set !top_level_var_map ~key:sym_name ~data:{ ocaml_name; repr = value_base_repr; is_mutated; needs_boxing };
+            )
+      | _ -> ()
     );
 
-  (* Initialize the mutable environment table within the generated code *)
-  Buffer.add_string body_buffer "let module_env_tbl = String.Table.create () ~size:16 in\n";
-  (* Add defined functions to the table *)
-  Map.iteri !top_level_var_map ~f:(fun ~key:name ~data:{ ocaml_name; _ } ->
-      Buffer.add_string body_buffer (sprintf "Hashtbl.set module_env_tbl ~key:%S ~data:!%s;\n" name ocaml_name)
+  let final_top_level_env = !top_level_var_map in (* Env containing all top-level vars *)
+
+  (* Pass 1.1: Create map of first defining expressions *)
+  let first_def_map = ref String.Map.empty in
+  List.iter texprs ~f:(fun texpr ->
+      match texpr with
+       | TypedAst.Defun { name; _ } ->
+           if not (Map.mem !first_def_map name) then
+             first_def_map := Map.set !first_def_map ~key:name ~data:texpr
+       | TypedAst.Setq { pairs; _ } ->
+           List.iter pairs ~f:(fun (sym_name, _) ->
+               if not (Map.mem !first_def_map sym_name) then
+                 first_def_map := Map.set !first_def_map ~key:sym_name ~data:texpr
+             )
+       | _ -> ()
     );
 
-  (* Process run expressions sequentially *)
+  (* Pass 1.5: Generate OCaml 'let' bindings for all top-level vars & initial env set *)
+  (* Corrected: Iterate over texprs to maintain order *)
+  let defined_in_pass1_5 = ref String.Set.empty in
+  List.iter texprs ~f:(fun defining_expr ->
+      let process_var name =
+          if not (Set.mem !defined_in_pass1_5 name) then (
+              match Map.find final_top_level_env name with
+              | None -> () (* Should not happen if Pass 1 was correct *)
+              | Some { ocaml_name; repr=base_repr; is_mutated; needs_boxing } -> (* Use base_repr from map *)
+                  let first_def_expr = Map.find_exn !first_def_map name in
+                  (* Only generate definition if current expr is the first defining one *)
+                  if phys_equal defining_expr first_def_expr then (
+                      defined_in_pass1_5 := Set.add !defined_in_pass1_5 name; (* Mark as defined *)
+                      let initial_value_code, initial_value_repr =
+                          match defining_expr with
+                          | TypedAst.Defun { args; body; fun_type; _ } ->
+                              let lambda_code = translate_lambda final_top_level_env needs_boxing_set args body fun_type in
+                              (lambda_code, R_Value) (* Defun always results in Value.t *)
+                          | TypedAst.Setq { pairs; _ } ->
+                              let _, typed_value = List.find_exn pairs ~f:(fun (n,_) -> String.equal n name) in
+                              let code, repr = translate_node final_top_level_env needs_boxing_set typed_value in
+                              (code, repr)
+                          | _ -> failwith "Internal error: Unexpected defining expr type in Pass 1.5"
+                      in
+
+                      let final_repr = if needs_boxing then R_Value else base_repr in
+                      let use_ref = is_mutated || needs_boxing in (* Should always be true for top-level *)
+
+                      let ocaml_type_annot, binding_keyword =
+                         match final_repr, use_ref with
+                         | R_Int, true   -> (": int ref", "ref") | R_Float, true -> (": float ref", "ref")
+                         | R_Bool, true  -> (": bool ref", "ref") | R_Value, true -> (": Value.t ref", "ref")
+                         | _, false -> failwith "Internal error: Top-level var should be ref"
+                      in
+                      let keyword_space = if String.is_empty binding_keyword then "" else " " in
+                      (* Box the initial value if needed for the ref *)
+                      let initial_value_for_ref =
+                          if needs_boxing && not (equal_var_repr initial_value_repr R_Value) then box_value initial_value_code initial_value_repr
+                          else initial_value_code
+                      in
+                      Buffer.add_string definitions_buffer (sprintf "let %s %s =%s%s (%s) in\n" ocaml_name ocaml_type_annot keyword_space binding_keyword initial_value_for_ref);
+                      (* Add code to initialize the hash table *)
+                      let current_val_code = sprintf "!%s" ocaml_name in
+                      (* Corrected: Use needs_boxing flag and base repr ('repr') *)
+                      let value_for_tbl = if needs_boxing then current_val_code else box_value current_val_code base_repr in
+                      Buffer.add_string initial_env_set_buffer (sprintf "Hashtbl.set module_env_tbl ~key:%S ~data:%s;\n" name value_for_tbl)
+                  )
+          )
+      in
+      match defining_expr with
+      | TypedAst.Defun { name; _ } -> process_var name
+      | TypedAst.Setq { pairs; _ } -> List.iter pairs ~f:(fun (name, _) -> process_var name)
+      | _ -> ()
+  );
+
+
+  (* Pass 2: Generate execution code for run_expressions *)
+  let execution_buffer = Buffer.create 512 in
   let run_expressions = List.filter texprs ~f:(function TypedAst.Defun _ -> false | _ -> true) in
   List.iter run_expressions ~f:(fun expr ->
-      (* Special handling for top-level Setq *)
       match expr with
       | TypedAst.Setq { pairs; inferred_type=_ } ->
           List.iter pairs ~f:(fun (sym_name, typed_value) ->
-              let current_env = !top_level_var_map in
-              let value_needs_boxing = Set.mem needs_boxing_set sym_name in
-              let value_ast_type = TypedAst.get_type typed_value in
-               (* Qualify all T_* constructors *)
-              let value_base_repr = match value_ast_type with | InferredType.T_Int -> R_Int | InferredType.T_Float -> R_Float | InferredType.T_Bool | InferredType.T_Nil -> R_Bool | _ -> R_Value in
-              let value_final_repr = if value_needs_boxing then R_Value else value_base_repr in
-
-              (* Translate value using current top-level env *)
-              let value_code = match value_final_repr with
-                | R_Int -> to_int current_env needs_boxing_set typed_value
-                | R_Float -> to_float current_env needs_boxing_set typed_value
-                | R_Bool -> to_bool current_env needs_boxing_set typed_value
-                | R_Value -> to_value current_env needs_boxing_set typed_value
-              in
-
-              match Map.find current_env sym_name with
+              match Map.find final_top_level_env sym_name with
               | Some { ocaml_name; is_mutated; needs_boxing; repr=base_repr } ->
-                  (* Existing variable assignment *)
-                  if not is_mutated then
-                    failwithf "Translate Error: Attempt to setq non-mutable top-level variable '%s'" sym_name ()
+                  (* Check if this is the *first* setq for this var *)
+                  let defining_expr = Map.find_exn !first_def_map sym_name in
+                  if phys_equal expr defining_expr then
+                    () (* Initialization already handled in Pass 1.5, skip assignment *)
+                  else if not is_mutated then
+                     failwith "Internal error: Top-level var not mutable" (* Should be true *)
                   else
+                    (* This is a subsequent assignment *)
                     let assign_code =
                       if needs_boxing then (* Assigning to Value.t ref *)
-                         sprintf "%s := %s;" ocaml_name (to_value current_env needs_boxing_set typed_value)
+                         sprintf "%s := %s;" ocaml_name (to_value final_top_level_env needs_boxing_set typed_value)
                       else (* Assigning to native ref *)
                          match base_repr with
-                         | R_Int -> sprintf "%s := %s;" ocaml_name (to_int current_env needs_boxing_set typed_value)
-                         | R_Float -> sprintf "%s := %s;" ocaml_name (to_float current_env needs_boxing_set typed_value)
-                         | R_Bool -> sprintf "%s := %s;" ocaml_name (to_bool current_env needs_boxing_set typed_value)
-                         | R_Value -> sprintf "%s := %s;" ocaml_name (to_value current_env needs_boxing_set typed_value)
+                         | R_Int -> sprintf "%s := %s;" ocaml_name (to_int final_top_level_env needs_boxing_set typed_value)
+                         | R_Float -> sprintf "%s := %s;" ocaml_name (to_float final_top_level_env needs_boxing_set typed_value)
+                         | R_Bool -> sprintf "%s := %s;" ocaml_name (to_bool final_top_level_env needs_boxing_set typed_value)
+                         | R_Value -> sprintf "%s := %s;" ocaml_name (to_value final_top_level_env needs_boxing_set typed_value)
                     in
-                    Buffer.add_string body_buffer assign_code;
+                    Buffer.add_string execution_buffer assign_code;
                     (* Update the Hashtbl for the final environment *)
-                    let current_val_code = sprintf "!%s" ocaml_name in
-                    (* Corrected: Use needs_boxing flag to determine if value is already Value.t *)
-                    let value_for_tbl = if needs_boxing then current_val_code else box_value current_val_code base_repr in
-                    Buffer.add_string body_buffer (sprintf "\nHashtbl.set module_env_tbl ~key:%S ~data:%s;\n" sym_name value_for_tbl)
-
-              | None ->
-                  (* New variable definition *)
-                  (* Corrected: Assume new top-level setq vars are mutable *)
-                  let is_mutated = true in
-                  let needs_boxing = value_needs_boxing in
-                  let final_repr = value_final_repr in
-                  let use_ref = is_mutated || needs_boxing in (* Will always be true now *)
-                  let ocaml_name = generate_ocaml_var sym_name in
-
-                  (* Add binding to tracking map for subsequent expressions *)
-                  (* Corrected: Use value_base_repr *)
-                  top_level_var_map := Map.set !top_level_var_map ~key:sym_name ~data:{ ocaml_name; repr=value_base_repr; is_mutated; needs_boxing };
-
-                  (* Generate OCaml let binding (will always be a ref now) *)
-                  let ocaml_type_annot, binding_keyword =
-                     match final_repr, use_ref with
-                     | R_Int, true   -> (": int ref", "ref") | R_Float, true -> (": float ref", "ref")
-                     | R_Bool, true  -> (": bool ref", "ref") | R_Value, true -> (": Value.t ref", "ref")
-                     | R_Int, false  -> (": int", "") | R_Float, false-> (": float", "") (* Unreachable *)
-                     | R_Bool, false -> (": bool", "") | R_Value, false-> (": Value.t", "") (* Unreachable *)
-                  in
-                  let keyword_space = if String.is_empty binding_keyword then "" else " " in
-                  Buffer.add_string body_buffer (sprintf "let %s %s =%s%s (%s) in\n" ocaml_name ocaml_type_annot keyword_space binding_keyword value_code);
-                  (* Add to the Hashtbl for the final environment *)
-                  let current_val_code = sprintf "!%s" ocaml_name in (* Always read from ref *)
-                   (* Corrected: Use needs_boxing flag and value_base_repr *)
-                  let value_for_tbl = if needs_boxing then current_val_code else box_value current_val_code value_base_repr in
-                  Buffer.add_string body_buffer (sprintf "Hashtbl.set module_env_tbl ~key:%S ~data:%s;\n" sym_name value_for_tbl)
+                    let updated_ocaml_value = sprintf "!%s" ocaml_name in
+                     (* Corrected: Use needs_boxing flag and base_repr *)
+                    let value_for_tbl = if needs_boxing then updated_ocaml_value else box_value updated_ocaml_value base_repr in
+                    Buffer.add_string execution_buffer (sprintf "\nHashtbl.set module_env_tbl ~key:%S ~data:%s;\n" sym_name value_for_tbl)
+              | None -> failwith "Internal error: Setq variable not found in Pass 2" (* Should have been created in Pass 1 *)
             )
       | _ ->
           (* Other top-level expressions (e.g., function calls for side effects) *)
-          let code, _ = translate_node !top_level_var_map needs_boxing_set expr in
-          Buffer.add_string body_buffer (sprintf "let (_ : _) = %s in ()\n" code)
+          let code, _ = translate_node final_top_level_env needs_boxing_set expr in
+          (* Corrected: Use ignore to handle side effects properly *)
+          Buffer.add_string execution_buffer (sprintf "ignore (%s);\n" code)
     );
 
-  (* Add final return *)
-  Buffer.add_string body_buffer "Hashtbl.to_alist module_env_tbl\n";
-
   (* Assemble the final OCaml module string *)
+  Buffer.add_string body_buffer (Buffer.contents definitions_buffer);
+  Buffer.add_string body_buffer "let module_env_tbl = String.Table.create () ~size:16 in\n"; (* Initialize table *)
+  Buffer.add_string body_buffer (Buffer.contents initial_env_set_buffer); (* Set initial values *)
+  Buffer.add_string body_buffer (Buffer.contents execution_buffer); (* Add subsequent assignments/calls *)
+  Buffer.add_string body_buffer "Hashtbl.to_alist module_env_tbl\n"; (* Add final return *)
+
   sprintf
     "(* Generated by Scaml *)\n\n\
      open! Core\n\
