@@ -419,8 +419,22 @@ and translate_lambda env needs_boxing_set arg_spec body fun_type =
   let min_args = List.length arg_spec.required in
   let max_args_opt = if Option.is_some arg_spec.rest then None else Some (min_args + List.length arg_spec.optional) in
   Buffer.add_string code (sprintf "    let num_runtime_args = List.length runtime_args in\n");
-  let arity_check_msg = sprintf "\"lambda\" \"Expected %d%s args, got %%d\"" min_args (match max_args_opt with None -> "+" | Some m when m = min_args -> "" | Some m -> sprintf "-%d" m) in
-  Buffer.add_string code (sprintf "    if num_runtime_args < %d %s then Runtime.arity_error %s num_runtime_args;\n" min_args (match max_args_opt with None -> "" | Some m -> sprintf "|| num_runtime_args > %d" m) arity_check_msg);
+  (* Corrected: Generate the complete format string for the error message first *)
+  let expected_args_fmt_str =
+    sprintf "Expected %d%s args, got %%d" min_args
+      (match max_args_opt with
+      | None -> "+"
+      | Some m when m = min_args -> ""
+      | Some m -> sprintf "-%d" m)
+  in
+  Buffer.add_string code
+    (sprintf (* Corrected: Call Printf.sprintf inside to format the message before passing to arity_error *)
+       "    if num_runtime_args < %d %s then Runtime.arity_error \"lambda\" (Printf.sprintf %S num_runtime_args);\n"
+       min_args
+       (match max_args_opt with
+       | None -> ""
+       | Some m -> sprintf "|| num_runtime_args > %d" m) (* This part generates the condition correctly *)
+       expected_args_fmt_str); (* Pass the format string here *)
 
   (* Argument Binding & Environment Setup *)
   let inner_env_ref = ref env in
@@ -538,7 +552,7 @@ and translate_funcall env needs_boxing_set func args inferred_type : string * va
   let target_repr = match inferred_type with | InferredType.T_Int -> R_Int | InferredType.T_Float -> R_Float | InferredType.T_Bool | InferredType.T_Nil -> R_Bool | _ -> R_Value in
 
   (* --- Try Optimized Builtins First --- *)
-  let ( = ) = equal_var_repr in
+  let ( = ) = equal_var_repr in (* Use the derived equality for var_repr *)
   let optimized_result =
       match func, args with
       (* Arithmetic: Check inferred type of the *call* *)
