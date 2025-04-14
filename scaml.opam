@@ -24,6 +24,7 @@ depends: [
   "unix"
   "menhir"
   "menhirLib"
+  "readline"
   "odoc" {with-doc}
 ]
 build: [
