@@ -362,166 +362,26 @@ let rec check_mutations (ast: TypedAst.t) (candidates: String.Set.t) : String.Se
         in
         Set.union func_mut args_mut
     | TypedAst.Defun _ ->
-        (* Defun defines a function at top level; mutations inside it *)
-        (* don't affect outer lexical scopes being checked. *)
-        (* We could check for mutations of *global* variables here if needed, *)
-        (* but the current `check_mutations` focuses on lexical `candidates`. *)
+        (* Analyze defun body, but don't propagate mutations out *)
+        (* as they don't affect the outer lexical scope being checked *)
+        (* let _ = check_mutations (Progn { forms = body; ...}) candidates in *)
         String.Set.empty
 
 
 (* --- Type Change Analysis Helpers --- *)
-
-(** Checks if two inferred types are compatible for assignment without boxing.
-    Uses a strict definition: must be same base type or involve Any/Unknown/Var.
-    Unions are compatible if the assigned type is compatible with any member. *)
-let rec are_types_compatible (t_var: InferredType.t) (t_assigned: InferredType.t) : bool =
-  let open InferredType in
-  match (t_var, t_assigned) with
-  (* Allow Any/Unknown/Var to be compatible with anything *)
-  | T_Any, _ | _, T_Any | T_Unknown, _ | _, T_Unknown | T_Var _, _ | _, T_Var _ -> true
-  (* Check for same base type *)
-  | T_Nil, T_Nil -> true
-  | T_Bool, T_Bool -> true
-  | T_Int, T_Int -> true
-  | T_Float, T_Float -> true
-  | T_Char, T_Char -> true
-  | T_String, T_String -> true
-  | T_Symbol, T_Symbol -> true
-  | T_Keyword, T_Keyword -> true
-  (* TODO: Refine structural type compatibility? *)
-  | T_Cons _, T_Cons _ -> true (* Assume compatible for now *)
-  | T_Vector _, T_Vector _ -> true (* Assume compatible for now *)
-  | T_Function _, T_Function _ -> true (* Assume compatible for now *)
-  (* Handle Unions *)
-  (* If var is a union, assigned must be compatible with at least one member *)
-  | T_Union s1, t2 -> Set.exists s1 ~f:(fun member_t1 -> are_types_compatible member_t1 t2)
-  (* If assigned is a union, it must be compatible with the var type *)
-  (* (which means all members of assigned union must be compatible if var is concrete, *)
-  (* or at least one member if var is also a union - handled by previous case) *)
-  | t1, T_Union s2 -> Set.for_all s2 ~f:(fun member_t2 -> are_types_compatible t1 member_t2)
-  (* Otherwise, incompatible *)
-  | _, _ -> false
-
-(** Recursively traverses the AST to find variables that are assigned
-    incompatible types, indicating they need boxing.
-    [var_initial_types]: Map from var name to its initial inferred type in the current scope. *)
-let rec find_boxing_violations (ast: TypedAst.t) (var_initial_types: InferredType.t String.Map.t) : String.Set.t =
-  match ast with
-  | TypedAst.Atom _ | TypedAst.Quote _ -> String.Set.empty
-  | TypedAst.Setq { pairs; _ } ->
-      List.fold pairs ~init:String.Set.empty ~f:(fun acc (name, value_ast) ->
-          let violations_in_value = find_boxing_violations value_ast var_initial_types in
-          let current_violation =
-            match Map.find var_initial_types name with
-            | None -> String.Set.empty (* Global or undefined, ignore for boxing violation *)
-            | Some initial_type ->
-                let assigned_type = TypedAst.get_type value_ast in
-                if are_types_compatible initial_type assigned_type then
-                  String.Set.empty
-                else
-                  ( (* Debug print *)
-                    (* printf "Boxing violation: var=%s, initial=%s, assigned=%s\n%!" name (InferredType.to_string initial_type) (InferredType.to_string assigned_type); *)
-                    String.Set.singleton name (* Type violation! *)
-                  )
-          in
-          String.Set.union_list [acc; violations_in_value; current_violation]
-        )
-  | TypedAst.Progn { forms; _ } ->
-      List.fold forms ~init:String.Set.empty ~f:(fun acc form ->
-          Set.union acc (find_boxing_violations form var_initial_types)
-        )
-  | TypedAst.If { cond; then_branch; else_branch; _ } ->
-      let cond_v = find_boxing_violations cond var_initial_types in
-      let then_v = find_boxing_violations then_branch var_initial_types in
-      let else_v = Option.value_map else_branch ~default:String.Set.empty ~f:(fun e -> find_boxing_violations e var_initial_types) in
-      String.Set.union_list [cond_v; then_v; else_v]
-  | TypedAst.Let { bindings; body; _ } ->
-      (* Get initial types for new bindings *)
-      let inner_var_types =
-        List.fold bindings ~init:var_initial_types ~f:(fun acc_types (name, b_info) ->
-            Map.set acc_types ~key:name ~data:(TypedAst.get_type b_info.initializer_ast)
-          )
-      in
-      (* Check initializers (use outer scope's types) *)
-      let init_violations = List.fold bindings ~init:String.Set.empty ~f:(fun acc (_, b_info) ->
-            Set.union acc (find_boxing_violations b_info.initializer_ast var_initial_types)
-          )
-      in
-      (* Check body (use inner scope's types) *)
-      let body_violations = List.fold body ~init:String.Set.empty ~f:(fun acc form ->
-            Set.union acc (find_boxing_violations form inner_var_types)
-          )
-      in
-      Set.union init_violations body_violations
-  | TypedAst.LetStar { bindings; body; _ } ->
-      (* Process sequentially, updating initial types map *)
-      let init_violations, final_var_types =
-        List.fold bindings ~init:(String.Set.empty, var_initial_types)
-          ~f:(fun (acc_violations, current_types) (name, b_info) ->
-              (* Check initializer with current types *)
-              let init_v = find_boxing_violations b_info.initializer_ast current_types in
-              (* Add new binding's initial type for next step *)
-              let next_types = Map.set current_types ~key:name ~data:(TypedAst.get_type b_info.initializer_ast) in
-              (Set.union acc_violations init_v, next_types)
-            )
-      in
-      (* Check body using types from end of bindings *)
-      let body_violations = List.fold body ~init:String.Set.empty ~f:(fun acc form ->
-            Set.union acc (find_boxing_violations form final_var_types)
-          )
-      in
-      Set.union init_violations body_violations
-  | TypedAst.Lambda { args; body; _ } ->
-       (* Get initial types for arguments (treat as Any for now, or use inferred?) *)
-       (* Using Any simplifies things, as we only care about violations *within* the body *)
-       let inner_var_types =
-         let arg_names = args.required @ (List.map args.optional ~f:fst) @ (Option.to_list args.rest) in
-         List.fold arg_names ~init:var_initial_types ~f:(fun acc_types name ->
-             Map.set acc_types ~key:name ~data:InferredType.T_Any (* Assume Any initial type for args *)
-           )
-       in
-       (* Check body using inner scope's types *)
-       List.fold body ~init:String.Set.empty ~f:(fun acc form ->
-         Set.union acc (find_boxing_violations form inner_var_types)
-       )
-  | TypedAst.Cond { clauses; _ } ->
-      List.fold clauses ~init:String.Set.empty ~f:(fun acc (test_expr, body_exprs) ->
-          let test_v = find_boxing_violations test_expr var_initial_types in
-          let body_v = List.fold body_exprs ~init:String.Set.empty ~f:(fun acc' expr ->
-              Set.union acc' (find_boxing_violations expr var_initial_types)
-            )
-          in
-          String.Set.union_list [acc; test_v; body_v]
-        )
-  | TypedAst.Funcall { func; args; _ } ->
-      let func_v = find_boxing_violations func var_initial_types in
-      let args_v = List.fold args ~init:String.Set.empty ~f:(fun acc arg ->
-          Set.union acc (find_boxing_violations arg var_initial_types)
-        )
-      in
-      Set.union func_v args_v
-  | TypedAst.Defun { args; body; _ } ->
-      (* Analyze body, similar to Lambda *)
-      let inner_var_types =
-        let arg_names = args.required @ (List.map args.optional ~f:fst) @ (Option.to_list args.rest) in
-        List.fold arg_names ~init:var_initial_types ~f:(fun acc_types name ->
-            Map.set acc_types ~key:name ~data:InferredType.T_Any
-          )
-      in
-      List.fold body ~init:String.Set.empty ~f:(fun acc form ->
-        Set.union acc (find_boxing_violations form inner_var_types)
-      )
+(* Removed: find_boxing_violations and are_types_compatible *)
 
 
 (* --- Helper to analyze progn-like body --- *)
-(* This remains largely the same, but will be called by the updated analyze_let etc. *)
-let rec analyze_progn_body env body_values
+(* Modified: Pass needs_boxing_map_ref down *)
+let rec analyze_progn_body env needs_boxing_map_ref body_values
     : TypedAst.t list * substitution * InferredType.t =
   let typed_body, final_subst =
     List.fold body_values ~init:([], Subst.empty)
       ~f:(fun (acc_nodes, acc_subst) value ->
         let current_env = List.map env ~f:(fun (name, ty) -> (name, apply_subst acc_subst ty)) in
-        let typed_node, node_subst = analyze_expr current_env value in (* Analyze Value.t *)
+        (* Pass ref down *)
+        let typed_node, node_subst = analyze_expr current_env needs_boxing_map_ref value in
         (acc_nodes @ [typed_node], compose_subst acc_subst node_subst)
       )
   in
@@ -532,7 +392,8 @@ let rec analyze_progn_body env body_values
   (typed_body, final_subst, result_type)
 
 (* --- Core Analysis Function (Input: Value.t, Output: TypedAst.t * Substitution) --- *)
-and analyze_expr (env : analysis_env) (value : Value.t)
+(* Modified: Pass needs_boxing_map_ref down *)
+and analyze_expr (env : analysis_env) (needs_boxing_map_ref: bool String.Map.t ref) (value : Value.t)
     : TypedAst.t * substitution =
   match value with
   (* Atoms *)
@@ -558,10 +419,11 @@ and analyze_expr (env : analysis_env) (value : Value.t)
 
   (* Cons Cell: Potential special form or function call *)
   | Value.Cons { car; cdr } ->
-      analyze_cons_cell env car cdr
+      analyze_cons_cell env needs_boxing_map_ref car cdr
 
 (* Helper to analyze cons cells *)
-and analyze_cons_cell env car_val cdr_val : TypedAst.t * substitution =
+(* Modified: Pass needs_boxing_map_ref down *)
+and analyze_cons_cell env needs_boxing_map_ref car_val cdr_val : TypedAst.t * substitution =
     match car_val with
     (* --- Special Forms --- *)
     | Value.Symbol {name="quote"} ->
@@ -573,78 +435,74 @@ and analyze_cons_cell env car_val cdr_val : TypedAst.t * substitution =
 
     | Value.Symbol {name="if"} ->
         (match Value.value_to_list_opt cdr_val with
-         | Some [c; t] -> analyze_if env c t None
-         | Some [c; t; e] -> analyze_if env c t (Some e)
+         | Some [c; t] -> analyze_if env needs_boxing_map_ref c t None
+         | Some [c; t; e] -> analyze_if env needs_boxing_map_ref c t (Some e)
          | _ -> failwith "Malformed if: expected 2 or 3 arguments")
 
     | Value.Symbol {name="progn"} ->
         let body_values = Value.value_to_list_opt cdr_val |> Option.value ~default:[] in
-        let typed_forms, final_subst, result_type = analyze_progn_body env body_values in
+        let typed_forms, final_subst, result_type = analyze_progn_body env needs_boxing_map_ref body_values in
         (TypedAst.Progn { forms = typed_forms; inferred_type = result_type }, final_subst)
 
     | Value.Symbol {name="let"} ->
         (match Value.value_to_list_opt cdr_val with
          | Some (bindings_val :: body_values) ->
-             analyze_let env bindings_val body_values
+             analyze_let env needs_boxing_map_ref bindings_val body_values
          | _ -> failwith "Malformed let: expected bindings list and body")
 
     | Value.Symbol {name="let*"} ->
         (match Value.value_to_list_opt cdr_val with
          | Some (bindings_val :: body_values) ->
-             analyze_let_star env bindings_val body_values
+             analyze_let_star env needs_boxing_map_ref bindings_val body_values
          | _ -> failwith "Malformed let*: expected bindings list and body")
 
     | Value.Symbol {name="setq"} ->
         let pairs = Value.value_to_list_opt cdr_val |> Option.value ~default:[] in
-        analyze_setq env pairs
+        analyze_setq env needs_boxing_map_ref pairs
 
     | Value.Symbol {name="lambda"} ->
         (match Value.value_to_list_opt cdr_val with
          | Some (arg_list_val :: body_values) ->
-             analyze_lambda env arg_list_val body_values
+             analyze_lambda env needs_boxing_map_ref arg_list_val body_values
          | _ -> failwith "Malformed lambda: expected arg list and body")
 
     | Value.Symbol {name="defun"} ->
         (match Value.value_to_list_opt cdr_val with
          | Some (Value.Symbol {name} :: arg_list_val :: body_values) ->
-             analyze_defun env name arg_list_val body_values
+             analyze_defun env needs_boxing_map_ref name arg_list_val body_values
          | _ -> failwith "Malformed defun: expected name symbol, arg list, and body")
 
     | Value.Symbol {name="cond"} ->
         let clauses = Value.value_to_list_opt cdr_val |> Option.value ~default:[] in
-        analyze_cond env clauses
+        analyze_cond env needs_boxing_map_ref clauses
 
     (* --- Default: Assume Function Call --- *)
     | _ ->
         let args_values = Value.value_to_list_opt cdr_val |> Option.value ~default:[] in
-        analyze_funcall env car_val args_values (* Analyze car_val as the function *)
+        analyze_funcall env needs_boxing_map_ref car_val args_values (* Analyze car_val as the function *)
 
 
-(* --- Special Form Handlers (Need full rewrite logic for Value.t) --- *)
-
-and analyze_if env c_val t_val e_val_opt : TypedAst.t * substitution =
-  (* Analyze condition (c_val) *)
-  let typed_cond, s_cond = analyze_expr env c_val in
+(* --- Special Form Handlers --- *)
+(* Modified: Pass needs_boxing_map_ref down *)
+and analyze_if env needs_boxing_map_ref c_val t_val e_val_opt : TypedAst.t * substitution =
+  let typed_cond, s_cond = analyze_expr env needs_boxing_map_ref c_val in
   let env_after_cond = List.map env ~f:(fun (n,ty) -> (n, apply_subst s_cond ty)) in
-  (* Analyze then branch (t_val) *)
-  let typed_then, s_then = analyze_expr env_after_cond t_val in
+  let typed_then, s_then = analyze_expr env_after_cond needs_boxing_map_ref t_val in
   let subst_after_then = compose_subst s_cond s_then in
   let env_after_then = List.map env ~f:(fun (n,ty) -> (n, apply_subst subst_after_then ty)) in
-  (* Analyze else branch (e_val_opt) *)
   let typed_else_opt, final_subst = match e_val_opt with
     | None -> (None, subst_after_then)
     | Some e_val ->
-        let typed_else, s_else = analyze_expr env_after_then e_val in
+        let typed_else, s_else = analyze_expr env_after_then needs_boxing_map_ref e_val in
         (Some typed_else, compose_subst subst_after_then s_else)
   in
-  (* Determine result type *)
   let then_type = apply_subst final_subst (TypedAst.get_type typed_then) in
   let else_type = match typed_else_opt with None -> InferredType.T_Nil | Some te -> apply_subst final_subst (TypedAst.get_type te) in
   let result_type = InferredType.type_union then_type else_type in
   (TypedAst.If { cond=typed_cond; then_branch=typed_then; else_branch=typed_else_opt; inferred_type = result_type }, final_subst)
 
-
-and analyze_let env bindings_val body_values : TypedAst.t * substitution =
+(* Modified: Pass needs_boxing_map_ref down *)
+and analyze_let env needs_boxing_map_ref bindings_val body_values : TypedAst.t * substitution =
   let bindings_list = match Value.value_to_list_opt bindings_val with
     | Some l -> l | None -> failwith "Let bindings must be a proper list" in
   (* Analyze initializers in outer env *)
@@ -659,21 +517,20 @@ and analyze_let env bindings_val body_values : TypedAst.t * substitution =
           | _ -> failwith "Malformed let binding (structure)"
         in
         let env_for_init = List.map env ~f:(fun (n,ty)->(n, apply_subst acc_s ty)) in
-        let typed_init, init_s = analyze_expr env_for_init init_val in
+        let typed_init, init_s = analyze_expr env_for_init needs_boxing_map_ref init_val in
         (acc_b @ [(name, typed_init)], compose_subst acc_s init_s)
       ) in
   (* Create inner env *)
   let inner_env_bindings = List.map analyzed_bindings_tmp ~f:(fun (n,ti) -> (n, apply_subst init_subst (TypedAst.get_type ti))) in
   let inner_env = add_bindings env inner_env_bindings in
   (* Analyze body *)
-  let typed_body, body_subst, result_type = analyze_progn_body inner_env body_values in
+  let typed_body, body_subst, result_type = analyze_progn_body inner_env needs_boxing_map_ref body_values in
   let final_subst = compose_subst init_subst body_subst in
   let final_result_type = apply_subst final_subst result_type in
 
   (* Perform mutation analysis *)
   let bound_names = List.map analyzed_bindings_tmp ~f:fst in
   let bound_vars_set = String.Set.of_list bound_names in
-  (* Check for mutations of the bound vars within the fully analyzed body *)
   let mutated_in_body = List.fold typed_body ~init:String.Set.empty ~f:(fun acc form ->
       Set.union acc (check_mutations form bound_vars_set)
     )
@@ -683,15 +540,15 @@ and analyze_let env bindings_val body_values : TypedAst.t * substitution =
   let final_bindings = List.map analyzed_bindings_tmp ~f:(fun (name, typed_init) ->
       let binding_info = {
           TypedAst.initializer_ast = typed_init;
-          is_mutated = Set.mem mutated_in_body name; (* Set based on analysis *)
+          is_mutated = Set.mem mutated_in_body name;
       } in
       (name, binding_info)
     ) in
 
   (TypedAst.Let { bindings = final_bindings; body = typed_body; inferred_type = final_result_type }, final_subst)
 
-
-and analyze_let_star env bindings_val body_values : TypedAst.t * substitution =
+(* Modified: Pass needs_boxing_map_ref down *)
+and analyze_let_star env needs_boxing_map_ref bindings_val body_values : TypedAst.t * substitution =
    let bindings_list = match Value.value_to_list_opt bindings_val with
     | Some l -> l | None -> failwith "Let* bindings must be a proper list" in
    (* Fold through bindings sequentially to get typed initializers and final env *)
@@ -706,7 +563,7 @@ and analyze_let_star env bindings_val body_values : TypedAst.t * substitution =
            | _ -> failwith "Malformed let* binding (structure)"
          in
          let env_for_init = List.map current_env ~f:(fun (n,ty)->(n, apply_subst acc_s ty)) in
-         let typed_init, init_s = analyze_expr env_for_init init_val in
+         let typed_init, init_s = analyze_expr env_for_init needs_boxing_map_ref init_val in
          let combined_subst = compose_subst acc_s init_s in
          let binding_type = apply_subst combined_subst (TypedAst.get_type typed_init) in
          let next_env = add_binding current_env name binding_type in
@@ -714,51 +571,45 @@ and analyze_let_star env bindings_val body_values : TypedAst.t * substitution =
        ) in
    (* Analyze body *)
    let body_env = List.map bindings_env ~f:(fun (n,ty)->(n, apply_subst bindings_subst ty)) in
-   let typed_body, body_subst, result_type = analyze_progn_body body_env body_values in
+   let typed_body, body_subst, result_type = analyze_progn_body body_env needs_boxing_map_ref body_values in
    let final_subst = compose_subst bindings_subst body_subst in
    let final_result_type = apply_subst final_subst result_type in
 
    (* Perform mutation analysis for let* *)
    let final_bindings =
      List.mapi analyzed_bindings_tmp ~f:(fun i (name_i, typed_init_i) ->
-         (* Subsequent ASTs include initializers of later bindings and the body *)
-         let subsequent_init_asts =
-           List.map (List.drop analyzed_bindings_tmp (i + 1)) ~f:snd
-         in
+         let subsequent_init_asts = List.map (List.drop analyzed_bindings_tmp (i + 1)) ~f:snd in
          let subsequent_asts = subsequent_init_asts @ typed_body in
-         (* Check if name_i is mutated in any subsequent AST *)
-         let is_mutated =
-           List.exists subsequent_asts ~f:(fun ast ->
-             not (Set.is_empty (check_mutations ast (String.Set.singleton name_i)))
-           )
-         in
-         let binding_info = {
-             TypedAst.initializer_ast = typed_init_i;
-             is_mutated = is_mutated; (* Set based on sequential analysis *)
-         } in
+         let is_mutated = List.exists subsequent_asts ~f:(fun ast -> not (Set.is_empty (check_mutations ast (String.Set.singleton name_i)))) in
+         let binding_info = { TypedAst.initializer_ast = typed_init_i; is_mutated = is_mutated; } in
          (name_i, binding_info)
        )
    in
 
    (TypedAst.LetStar { bindings = final_bindings; body = typed_body; inferred_type = final_result_type }, final_subst)
 
-
-and analyze_setq env pairs_values : TypedAst.t * substitution =
+(* Modified: Pass needs_boxing_map_ref down and update it on type mismatch *)
+and analyze_setq env needs_boxing_map_ref pairs_values : TypedAst.t * substitution =
   if List.length pairs_values % 2 <> 0 then failwith "Setq needs even args";
   let rec process_pairs pairs acc_typed_pairs acc_subst =
     match pairs with
     | [] -> (List.rev acc_typed_pairs, acc_subst)
     | Value.Symbol {name=var_name} :: value_form :: rest ->
         let env_for_value = List.map env ~f:(fun (n,ty)->(n, apply_subst acc_subst ty)) in
-        let typed_value, value_subst = analyze_expr env_for_value value_form in
+        let typed_value, value_subst = analyze_expr env_for_value needs_boxing_map_ref value_form in
         let current_subst = compose_subst acc_subst value_subst in
         let value_type = apply_subst current_subst (TypedAst.get_type typed_value) in
-        (* Unify with existing type *)
+        (* Unify with existing type & check for boxing *)
         let final_subst = match List.Assoc.find env var_name ~equal:String.equal with
-          | Some existing_type ->
-              (try compose_subst current_subst (unify (apply_subst current_subst existing_type) value_type)
-               with Unification_error _ -> current_subst (* Ignore unification error on setq *))
-          | None -> current_subst
+          | Some existing_type_raw ->
+              let existing_type = apply_subst current_subst existing_type_raw in
+              (try compose_subst current_subst (unify existing_type value_type)
+               with Unification_error _ ->
+                (* Type mismatch detected! Mark variable as needing boxing *)
+                needs_boxing_map_ref := Map.set !needs_boxing_map_ref ~key:var_name ~data:true;
+                current_subst (* Return current subst, unification failed *)
+              )
+          | None -> current_subst (* Global or undefined, don't track boxing here *)
         in
         process_pairs rest ((var_name, typed_value) :: acc_typed_pairs) final_subst
     | not_symbol :: _ -> failwithf "Setq expected symbol, got %s" (!Value.to_string not_symbol) ()
@@ -767,74 +618,52 @@ and analyze_setq env pairs_values : TypedAst.t * substitution =
   let result_type = match List.last typed_pairs with None -> InferredType.T_Nil | Some (_,v) -> apply_subst final_subst (TypedAst.get_type v) in
   (TypedAst.Setq({ pairs = typed_pairs; inferred_type = result_type }), final_subst)
 
-
-and analyze_lambda env arg_list_val body_values : TypedAst.t * substitution =
+(* Modified: Pass needs_boxing_map_ref down *)
+and analyze_lambda env needs_boxing_map_ref arg_list_val body_values : TypedAst.t * substitution =
   let arg_spec = ArgListParser.parse arg_list_val in
-  (* Create fresh vars for args *)
   let create_binding name = (name, generate_fresh_type_var()) in
-  let arg_bindings =
-     List.map arg_spec.required ~f:create_binding @
-     List.map arg_spec.optional ~f:(fun (n,_) -> create_binding n) @
-     (match arg_spec.rest with Some n -> [create_binding n] | None -> [])
-   in
+  let arg_bindings = List.map arg_spec.required ~f:create_binding @ List.map arg_spec.optional ~f:(fun (n,_) -> create_binding n) @ (match arg_spec.rest with Some n -> [create_binding n] | None -> []) in
   let inner_env = add_bindings env arg_bindings in
-  (* Analyze body *)
-  let typed_body, body_subst, body_return_type = analyze_progn_body inner_env body_values in
-  (* Determine final signature *)
+  let typed_body, body_subst, body_return_type = analyze_progn_body inner_env needs_boxing_map_ref body_values in
   let final_arg_types = List.map arg_bindings ~f:(fun (_, ty) -> apply_subst body_subst ty) in
   let final_return_type = apply_subst body_subst body_return_type in
   let fun_info = { InferredType.arg_types = Some final_arg_types; return_type = final_return_type } in
   let inferred_type = InferredType.T_Function fun_info in
-  (* Pass the *parsed* arg_spec, not the value *)
-  (* Note: Mutation analysis for lambda arguments is implicitly handled by *)
-  (* check_mutations when called on the lambda body from an outer scope, *)
-  (* as it removes arg names from candidates passed down. *)
   let node = TypedAst.Lambda { args = arg_spec; body = typed_body; inferred_type } in
-  (node, Subst.empty) (* Lambda subst is internal *)
+  (node, Subst.empty)
 
-
-and analyze_defun env name arg_list_val body_values : TypedAst.t * substitution =
+(* Modified: Pass needs_boxing_map_ref down *)
+and analyze_defun env needs_boxing_map_ref name arg_list_val body_values : TypedAst.t * substitution =
   let arg_spec = ArgListParser.parse arg_list_val in
-  (* Create fresh vars *)
-  let arg_bindings =
-     List.map arg_spec.required ~f:(fun n->(n, generate_fresh_type_var())) @
-     List.map arg_spec.optional ~f:(fun (n,_)->(n, generate_fresh_type_var())) @
-     (match arg_spec.rest with Some n -> [(n, generate_fresh_type_var())] | None -> []) in
+  let arg_bindings = List.map arg_spec.required ~f:(fun n->(n, generate_fresh_type_var())) @ List.map arg_spec.optional ~f:(fun (n,_)->(n, generate_fresh_type_var())) @ (match arg_spec.rest with Some n -> [(n, generate_fresh_type_var())] | None -> []) in
    let initial_ret_type_var = generate_fresh_type_var() in
    let initial_fun_type = InferredType.T_Function { arg_types = Some (List.map arg_bindings ~f:snd); return_type = initial_ret_type_var } in
-   (* Add function itself for recursion *)
    let env_for_body = add_bindings (add_binding env name initial_fun_type) arg_bindings in
-   (* Analyze body *)
-   let typed_body, body_subst, body_return_type = analyze_progn_body env_for_body body_values in
-   (* Unify return types *)
+   let typed_body, body_subst, body_return_type = analyze_progn_body env_for_body needs_boxing_map_ref body_values in
    let final_subst = try compose_subst body_subst (unify (apply_subst body_subst initial_ret_type_var) (apply_subst body_subst body_return_type)) with Unification_error _ -> body_subst in
-   (* Final signature *)
    let final_arg_types = List.map arg_bindings ~f:(fun (_,ty) -> apply_subst final_subst ty) in
    let final_return_type = apply_subst final_subst body_return_type in
    let final_fun_info = { InferredType.arg_types = Some final_arg_types; return_type = final_return_type } in
    let final_fun_type = InferredType.T_Function final_fun_info in
-   (* Pass parsed arg_spec *)
-   (* Defun implicitly creates a mutable binding at top level *)
    let node = TypedAst.Defun { name = name; args = arg_spec; body = typed_body; fun_type = final_fun_type; inferred_type = InferredType.T_Symbol } in
-   (node, Subst.empty) (* Defun subst handled in toplevel *)
+   (node, Subst.empty)
 
-
-and analyze_cond env clause_values : TypedAst.t * substitution =
+(* Modified: Pass needs_boxing_map_ref down *)
+and analyze_cond env needs_boxing_map_ref clause_values : TypedAst.t * substitution =
   let analyzed_clauses, final_subst, result_type =
     List.fold clause_values ~init:([], Subst.empty, InferredType.T_Nil)
       ~f:(fun (acc_clauses, acc_subst, acc_type) clause_val ->
         match Value.value_to_list_opt clause_val with
         | Some (test_val :: body_vals) ->
             let env_for_clause = List.map env ~f:(fun (n,ty) -> (n, apply_subst acc_subst ty)) in
-            let typed_test, test_subst = analyze_expr env_for_clause test_val in
+            let typed_test, test_subst = analyze_expr env_for_clause needs_boxing_map_ref test_val in
             let composed_subst = compose_subst acc_subst test_subst in
             let env_after_test = List.map env ~f:(fun (n,ty)->(n, apply_subst composed_subst ty)) in
-            (* Analyze body *)
             let typed_body, body_subst, clause_result_type =
               if List.is_empty body_vals then
                  ([typed_test], Subst.empty, apply_subst composed_subst (TypedAst.get_type typed_test))
               else
-                 analyze_progn_body env_after_test body_vals
+                 analyze_progn_body env_after_test needs_boxing_map_ref body_vals
             in
             let final_clause_subst = compose_subst composed_subst body_subst in
             let final_clause_type = apply_subst final_clause_subst clause_result_type in
@@ -844,19 +673,16 @@ and analyze_cond env clause_values : TypedAst.t * substitution =
   in
   (TypedAst.Cond ({ clauses = analyzed_clauses; inferred_type = result_type }), final_subst)
 
-
-and analyze_funcall env func_val args_values : TypedAst.t * substitution =
-  (* Analyze function expression *)
-  let typed_head, head_subst = analyze_expr env func_val in
-  (* Analyze arguments sequentially *)
+(* Modified: Pass needs_boxing_map_ref down *)
+and analyze_funcall env needs_boxing_map_ref func_val args_values : TypedAst.t * substitution =
+  let typed_head, head_subst = analyze_expr env needs_boxing_map_ref func_val in
   let args_subst, typed_args = List.fold_map args_values ~init:head_subst
     ~f:(fun acc_s arg_val ->
       let env_for_arg = List.map env ~f:(fun (n,ty)->(n, apply_subst acc_s ty)) in
-      let typed_arg, arg_s = analyze_expr env_for_arg arg_val in
+      let typed_arg, arg_s = analyze_expr env_for_arg needs_boxing_map_ref arg_val in
       (compose_subst acc_s arg_s, typed_arg)
     )
   in
-  (* Get types after substitutions *)
   let func_type = apply_subst args_subst (TypedAst.get_type typed_head) in
   let actual_arg_types = List.map typed_args ~f:(fun ta -> apply_subst args_subst (TypedAst.get_type ta)) in
 
@@ -893,28 +719,46 @@ and analyze_funcall env func_val args_values : TypedAst.t * substitution =
 
 
 (* --- Top Level Analysis --- *)
-(* Modified return type to include set of vars needing boxing *)
+(* Modified: Process sequentially, integrate boxing check *)
 let analyze_toplevel (values : Value.t list)
     : TypedAst.t list * (string * InferredType.t) list * String.Set.t =
-  let final_env_map = ref String.Map.empty in
+  let final_env_map = ref String.Map.empty in (* Tracks types of top-level vars *)
   let final_subst = ref Subst.empty in
+  let needs_boxing_map_ref = ref String.Map.empty in (* Tracks vars needing boxing *)
+  let final_tasts = ref [] in
 
-  (* Pass 1: Type inference and substitution application *)
-  let typed_asts = List.map values ~f:(fun value ->
-      let current_env = Map.to_alist !final_env_map in
-      let typed_ast, subst = analyze_expr current_env value in
-      final_subst := compose_subst !final_subst subst;
-      (* Update global env for defun *)
-      (match typed_ast with
+  (* Process expressions sequentially, updating env and subst *)
+  List.iter values ~f:(fun value ->
+      let current_env_alist = Map.to_alist !final_env_map in
+      let current_env_subst = !final_subst in
+      (* Apply current substitution to env before analyzing next expression *)
+      let env_for_expr = List.map current_env_alist ~f:(fun (n, ty) -> (n, apply_subst current_env_subst ty)) in
+      (* Analyze expression, passing down the needs_boxing ref *)
+      let typed_ast, subst = analyze_expr env_for_expr needs_boxing_map_ref value in
+      final_tasts := !final_tasts @ [typed_ast]; (* Store TAST *)
+      final_subst := compose_subst current_env_subst subst; (* Update substitution *)
+
+      (* Update environment map based on what was defined/modified *)
+      (* Apply the *new* substitution to the whole env map *)
+      final_env_map := Map.map !final_env_map ~f:(apply_subst !final_subst);
+      (* Add/update based on defun or setq *)
+      match typed_ast with
        | TypedAst.Defun { name; fun_type; _ } ->
            final_env_map := Map.set !final_env_map ~key:name ~data:(apply_subst !final_subst fun_type)
+       | TypedAst.Setq { pairs; _} ->
+           (* Update types in env based on setq *)
+           List.iter pairs ~f:(fun (name, value_ast) ->
+               (* Only update if it's a known var (globals handled differently) *)
+               if Map.mem !final_env_map name then
+                 final_env_map := Map.set !final_env_map ~key:name ~data:(apply_subst !final_subst (TypedAst.get_type value_ast))
+               else
+                 (* If it's the first time seeing this var via setq at top level, add it *)
+                 final_env_map := Map.set !final_env_map ~key:name ~data:(apply_subst !final_subst (TypedAst.get_type value_ast))
+             )
        | _ -> ()
-      );
-      final_env_map := Map.map !final_env_map ~f:(apply_subst !final_subst);
-      typed_ast
-    )
-  in
-  (* Final pass to apply substitution to TAST *)
+    );
+
+  (* Final pass to apply final substitution to all stored TASTs *)
   let rec final_apply tast =
     let apply_t = apply_subst !final_subst in
     match tast with
@@ -923,17 +767,13 @@ let analyze_toplevel (values : Value.t list)
     | TypedAst.If ({ inferred_type=t; cond; then_branch; else_branch; _ }) -> TypedAst.If { cond=final_apply cond; then_branch=final_apply then_branch; else_branch=Option.map else_branch ~f:final_apply; inferred_type=apply_t t }
     | TypedAst.Progn ({ inferred_type=t; forms; _ }) -> TypedAst.Progn { forms=List.map forms ~f:final_apply; inferred_type=apply_t t }
     | TypedAst.Let ({ inferred_type=t; bindings; body; _ }) ->
-        (* Apply to binding_info - Explicit record construction *)
         let final_apply_binding (name, b_info) =
-            (* Apply user's requested syntax, although likely incorrect *)
             let new_init_ast = final_apply b_info.TypedAst.initializer_ast in
             (name, { TypedAst.initializer_ast = new_init_ast; is_mutated = b_info.is_mutated })
         in
         TypedAst.Let { bindings=List.map bindings ~f:final_apply_binding; body=List.map body ~f:final_apply; inferred_type=apply_t t }
     | TypedAst.LetStar ({ inferred_type=t; bindings; body; _ }) ->
-        (* Apply to binding_info - Explicit record construction *)
          let final_apply_binding (name, b_info) =
-             (* Apply user's requested syntax, although likely incorrect *)
              let new_init_ast = final_apply b_info.TypedAst.initializer_ast in
              (name, { TypedAst.initializer_ast = new_init_ast; is_mutated = b_info.is_mutated })
          in
@@ -944,15 +784,11 @@ let analyze_toplevel (values : Value.t list)
     | TypedAst.Cond ({ inferred_type=t; clauses; _ }) -> TypedAst.Cond { clauses=List.map clauses ~f:(fun (tst,bdy)->(final_apply tst, List.map bdy ~f:final_apply)); inferred_type=apply_t t }
     | TypedAst.Funcall ({ inferred_type=t; func; args; _ }) -> TypedAst.Funcall { func=final_apply func; args=List.map args ~f:final_apply; inferred_type=apply_t t }
   in
-  let final_tasts = List.map typed_asts ~f:final_apply in
+  let final_tasts_result = List.map !final_tasts ~f:final_apply in
   let final_env_alist = Map.to_alist !final_env_map in
 
-  (* Pass 2: Type Change Analysis *)
-  let initial_var_types = String.Map.of_alist_exn final_env_alist in
-  let needs_boxing_set = List.fold final_tasts ~init:String.Set.empty ~f:(fun acc tast ->
-      Set.union acc (find_boxing_violations tast initial_var_types)
-    )
-  in
+  (* Extract the set of variables needing boxing from the map updated during analysis *)
+  let needs_boxing_set = Map.keys !needs_boxing_map_ref |> String.Set.of_list in
 
-  (final_tasts, final_env_alist, needs_boxing_set) (* Return TASTs, final env types, and set of vars needing boxing *)
+  (final_tasts_result, final_env_alist, needs_boxing_set)
 
