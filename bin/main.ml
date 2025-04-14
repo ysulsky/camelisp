@@ -21,6 +21,12 @@ let scaml_compile_impl (code_list : Value.t list) : (string * Value.t) list =
      let typed_asts, final_env_types = Analyze.analyze_toplevel code_list in
      (* 2. Translate *)
      let ocaml_code = Translate.translate_toplevel typed_asts final_env_types in
+
+     (* Check verbose flag and print generated code if enabled *)
+     if Runtime.is_compile_verbose () then (
+        printf "\n--- Generated OCaml Code ---\n%s\n--------------------------\n%!" ocaml_code;
+     );
+
      (* 3. Compile and Load *)
      let _, get_env_func = Compiler.compile_and_load_string ocaml_code in
      (* 4. Get environment *)
@@ -42,6 +48,65 @@ let scaml_interpret_impl (code_list : Value.t list) : Value.t =
     | exn -> failwith ("Unexpected interpretation error: " ^ Exn.to_string exn)
 
 
+(* --- Readline Completion --- *)
+
+(* List of language keywords and special forms for completion *)
+let language_keywords = [
+  "quote"; "quasiquote"; "unquote"; "unquote-splicing"; "function"; (* Reader macros *)
+  "if"; "cond"; "progn"; "let"; "let*"; "setq"; "lambda"; "defun"; (* Special forms *)
+  "nil"; "t"; (* Constants *)
+  "compile"; "interpret"; (* Builtins that act like special forms *)
+  "set-compile-verbose"; "exit"; (* Other utility builtins *)
+  (* Add core builtins manually if desired, though they are also in globals *)
+  (* "cons"; "car"; "cdr"; "list"; "+"; "-"; "*"; "/"; "eq"; "equal"; ... *)
+]
+
+(* Helper to check if a character is a delimiter for completion *)
+let is_delimiter c =
+  String.contains " \t\n\r()[]'\",`" c
+
+(* Helper to extract the atom fragment before the cursor *)
+let get_atom_fragment (text : string) : string =
+  match String.rfindi text ~f:(fun _ c -> is_delimiter c) with
+  | None -> text (* No delimiter, whole string is the atom *)
+  | Some last_delimiter_index ->
+      (* Extract substring after the last delimiter *)
+      String.sub text ~pos:(last_delimiter_index + 1) ~len:(String.length text - (last_delimiter_index + 1))
+
+(* Completion generator function *)
+(* Takes the word being completed (up to the cursor) *)
+(* Returns a Readline.completion_result variant *)
+let completion_generator (text_before_cursor : string) : Readline.completion_result =
+  (* Extract the relevant atom fragment to complete *)
+  let atom_fragment = get_atom_fragment text_before_cursor in
+
+  (* If fragment is empty (e.g., user typed a space), offer no completions *)
+   if String.is_empty atom_fragment && not (String.is_empty text_before_cursor) then
+    Readline.Empty
+   else
+    (* Get all globally defined symbols *)
+    let global_symbols = Runtime.get_global_symbols () in
+    (* Combine globals and keywords, remove duplicates, and sort *)
+    let all_candidates =
+      List.dedup_and_sort ~compare:String.compare (language_keywords @ global_symbols)
+    in
+    (* Filter candidates that start with the atom fragment *)
+    let matching_symbols =
+      List.filter all_candidates ~f:(fun sym ->
+        String.is_prefix sym ~prefix:atom_fragment (* Match against the extracted fragment *)
+      )
+    in
+    (* If no matches, return Empty *)
+    if List.is_empty matching_symbols then
+      Readline.Empty (* Use constructor directly *)
+    else
+      (* Otherwise, map matches to (string * char) list and return Custom *)
+      let custom_completions =
+        List.map matching_symbols ~f:(fun sym -> (sym, ' ')) (* Use space as default type char *)
+      in
+      Readline.Custom custom_completions (* Use constructor directly *)
+
+
 (* --- REPL Implementation with Readline --- *)
 
 let run_repl () =
@@ -52,13 +117,20 @@ let run_repl () =
   (* Register 'exit' *)
   Runtime.register_global "exit" (Value.Builtin (fun _ -> continue := false; Value.Nil));
 
+  (* --- Setup Readline --- *)
+  Readline.init ();
+  (* Optional: Define characters that break words for completion *)
+  (* Readline.set_completion_word_break_characters " \t\n\"\\'`@$><=;|&{()}"; *)
+
   printf "Welcome to Scaml REPL!\n";
-  printf "Using Readline for input.\n";
-  printf "Use (exit) or Ctrl+D to quit.\n%!";
+  printf "Using Readline for input and completion (TAB).\n";
+  printf "Use (exit) or Ctrl+D to quit.\n";
+  printf "Use (set-compile-verbose t) to see generated code during compilation.\n%!";
 
   (* REPL Loop using Readline *)
   while !continue do
-    match Readline.readline ~prompt:"> " () with
+    (* Pass the completion function to readline *)
+    match Readline.readline ~prompt:"> " ~completion_fun:completion_generator () with
     | None -> (* EOF (Ctrl+D) *)
         continue := false;
         printf "\n%!" (* Print newline after Ctrl+D *)
@@ -98,7 +170,6 @@ let () =
   Runtime.register_interpret_impl scaml_interpret_impl;
   (* ******************************************** *)
 
-  (* Run the REPL *)
-  Readline.init ();
+  (* Run the REPL (Readline init is now inside run_repl) *)
   run_repl ()
 

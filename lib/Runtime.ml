@@ -35,6 +35,10 @@ let lookup_variable (name : string) : Value.t =
   | Some v -> v
   | None -> runtime_error "lookup_variable" (sprintf "Variable '%s' is void" name)
 
+(* Function to get all globally defined symbols *)
+let get_global_symbols () : string list =
+  Hashtbl.keys global_env
+
 (* --- Function Application --- *)
 let apply_function (func : Value.t) (args : Value.t list) : Value.t =
   match func with
@@ -44,6 +48,10 @@ let apply_function (func : Value.t) (args : Value.t list) : Value.t =
 
 (* --- Basic Helpers --- *)
 let is_truthy = Value.is_truthy
+
+(* --- Compile Verbose Flag --- *)
+let compile_verbose_p = ref false (* Internal OCaml flag *)
+let is_compile_verbose () = !compile_verbose_p (* Accessor for other modules *)
 
 (* --- Built-in Function Implementations --- *)
 (* Adapted for mutable cons cells *)
@@ -293,28 +301,37 @@ let builtin_interpret args = (* args has type Value.t list *)
       end
   | _ -> arity_error "interpret" (sprintf "expected 1 argument (a quoted list of expressions), got %d" (List.length args))
 
-(* --- Assoc Builtin Implementation --- *)
+(* --- Assoc Builtin Implementation (Reverted) --- *)
 
+(* Original implementation for (assoc KEY ALIST) *)
 let builtin_assoc args =
   match args with
-  | [ key; alist_val ] ->
+  | [ key; alist_val ] -> (* key is arg1, alist_val is arg2 *)
       let rec find_in_alist lst =
         match lst with
         | Value.Nil -> Value.Nil (* Not found *)
-        | Value.Cons { car = pair; cdr = rest } -> (* No refs *)
+        | Value.Cons { car = pair; cdr = rest } ->
             (match pair with
-             | Value.Cons { car = item_key; cdr = _ } -> (* No refs *)
-                 (* Use 'equal' for comparison, as keys can be any type *)
-                 if [%compare.equal: Value.t] key item_key then (* No refs *)
+             | Value.Cons { car = item_key; cdr = _ } ->
+                 (* Compare the key we're looking for (key from outer scope) with the item's key *)
+                 if [%compare.equal: Value.t] key item_key then
                    pair (* Found the pair *)
                  else
-                   find_in_alist rest (* Check rest of the list - No refs *)
-             | _ -> find_in_alist rest (* Skip malformed pair - No refs *)
+                   find_in_alist rest (* Check rest of the list *)
+             | _ -> find_in_alist rest (* Skip malformed pair (element wasn't a cons cell) *)
             )
-        | _ -> runtime_error "assoc" "Second argument must be a proper association list"
+        | _ -> runtime_error "assoc" "Second argument must be a proper association list" (* Error if lst is not Nil or Cons *)
       in
-      find_in_alist alist_val
+      find_in_alist alist_val (* <<< Start search with the ALIST argument (alist_val) *)
   | _ -> arity_error "assoc" (sprintf "expected 2 arguments (key alist), got %d" (List.length args))
+
+(* --- Setter for Compile Verbose Flag --- *)
+let builtin_set_compile_verbose args =
+  match args with
+  | [ flag_val ] ->
+      compile_verbose_p := Value.is_truthy flag_val; (* Set the internal OCaml ref *)
+      flag_val (* Return the flag value passed *)
+  | _ -> arity_error "set-compile-verbose" "expected 1 argument (t or nil)"
 
 
 (* --- Register Built-ins --- *)
@@ -337,6 +354,8 @@ let () =
   (* Execution Modes *)
   register "compile" builtin_compile; (* Uses registered implementation *)
   register "interpret" builtin_interpret; (* Uses registered implementation *)
+  (* Settings *)
+  register "set-compile-verbose" builtin_set_compile_verbose; (* Added setter *)
   (* Constants *)
   register_global "nil" Value.Nil; register_global "t" Value.T;
   ()
