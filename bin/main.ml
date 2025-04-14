@@ -29,10 +29,8 @@ let scaml_compile_impl (code_list : Value.t list) : (string * Value.t) list =
         printf "\n--- Generated OCaml Code ---\n%s\n--------------------------\n%!" ocaml_code;
      );
 
-     (* 3. Compile and Load - Now returns only one function *)
-     let execute_and_get_env_func = Compiler.compile_and_load_string ocaml_code in
-     (* 4. Execute the compiled code and get the environment *)
-     execute_and_get_env_func () (* Call the function to get the alist *)
+     (* 3. Compile and Load *)
+     Compiler.compile_and_load_string ocaml_code
   with
    (* Propagate errors, potentially wrapping them *)
    | Compiler.Compilation_error msg -> failwith ("Compilation Error: " ^ msg)
