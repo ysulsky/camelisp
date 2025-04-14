@@ -164,14 +164,16 @@ and translate_node env texpr =
           | Value.Symbol { name } -> (
               match lookup_var_info env name with
               (* Local variables: access depends on mutation status *)
-              | Some { ocaml_name; repr = R_Value; is_mutated=true } -> sprintf "!%s" ocaml_name (* Value.t ref *)
-              | Some { ocaml_name; repr = R_Int; is_mutated=true } -> sprintf "!%s" ocaml_name (* int ref *)
-              | Some { ocaml_name; repr = R_Float; is_mutated=true } -> sprintf "!%s" ocaml_name (* float ref *)
-              | Some { ocaml_name; repr = R_Bool; is_mutated=true } -> sprintf "!%s" ocaml_name (* bool ref *)
-              | Some { ocaml_name; repr = R_Value; is_mutated=false } -> ocaml_name (* Direct Value.t *)
-              | Some { ocaml_name; repr = R_Int; is_mutated=false } -> ocaml_name (* Direct int *)
-              | Some { ocaml_name; repr = R_Float; is_mutated=false } -> ocaml_name (* Direct float *)
-              | Some { ocaml_name; repr = R_Bool; is_mutated=false } -> ocaml_name (* Direct bool *)
+              (* Accessing a ref requires '!' *)
+              | Some { ocaml_name; repr = R_Value; is_mutated=true } -> sprintf "!%s" ocaml_name
+              | Some { ocaml_name; repr = R_Int; is_mutated=true } -> sprintf "!%s" ocaml_name
+              | Some { ocaml_name; repr = R_Float; is_mutated=true } -> sprintf "!%s" ocaml_name
+              | Some { ocaml_name; repr = R_Bool; is_mutated=true } -> sprintf "!%s" ocaml_name
+              (* Accessing a direct binding uses the name directly *)
+              | Some { ocaml_name; repr = R_Value; is_mutated=false } -> ocaml_name
+              | Some { ocaml_name; repr = R_Int; is_mutated=false } -> ocaml_name
+              | Some { ocaml_name; repr = R_Float; is_mutated=false } -> ocaml_name
+              | Some { ocaml_name; repr = R_Bool; is_mutated=false } -> ocaml_name
               (* Globals: lookup via runtime *)
               | None -> sprintf "(Runtime.lookup_variable %S)" name
               )
@@ -253,7 +255,7 @@ and translate_let env bindings body inferred_type =
   let let_bindings_code_list =
     List.map bindings ~f:(fun (elisp_name, binding_info) ->
         let typed_init = binding_info.TypedAst.initializer_ast in
-        let is_mutated = binding_info.TypedAst.is_mutated in
+        let is_mutated = binding_info.TypedAst.is_mutated in (* Use flag from analysis *)
         let init_type = TypedAst.get_type typed_init in
         let ocaml_name = generate_ocaml_var elisp_name in
 
@@ -298,7 +300,7 @@ and translate_let_star env bindings body inferred_type =
     List.fold bindings ~init:(env, "")
       ~f:(fun (current_env, current_code) (elisp_name, binding_info) ->
         let typed_init = binding_info.TypedAst.initializer_ast in
-        let is_mutated = binding_info.TypedAst.is_mutated in
+        let is_mutated = binding_info.TypedAst.is_mutated in (* Use flag from analysis *)
         let init_type = TypedAst.get_type typed_init in
         let ocaml_name = generate_ocaml_var elisp_name in
 
@@ -356,6 +358,9 @@ and translate_setq env pairs inferred_type =
         | Some { ocaml_name; repr = R_Bool; is_mutated = true } ->
             sprintf "%s := (%s);" ocaml_name (to_bool env typed_value)
         | Some { ocaml_name; repr = R_Value; is_mutated = true } ->
+            (* Assigning to a Value.t ref *)
+            (* TODO: Type change analysis needed here. If value_type is incompatible *)
+            (* with the original repr, this might be wrong or need boxing. *)
             let value_code = match value_type with
               | T_Int -> to_int env typed_value |> box_int
               | T_Float -> to_float env typed_value |> box_float
@@ -413,7 +418,7 @@ and translate_lambda env arg_spec body fun_type =
   let arg_bindings_code = Buffer.create 128 in
   let arg_idx = ref 0 in
 
-  (* TODO: Perform mutation analysis on lambda body w.r.t args *)
+  (* Perform mutation analysis on lambda body w.r.t args *)
   let lambda_body_ast = TypedAst.Progn { forms = body; inferred_type = inferred_return_type } in
   let arg_names_set = String.Set.of_list (arg_spec.required @ List.map ~f:fst arg_spec.optional @ Option.to_list arg_spec.rest) in
   let mutated_args = Analyze.check_mutations lambda_body_ast arg_names_set in
@@ -426,6 +431,7 @@ and translate_lambda env arg_spec body fun_type =
       let ocaml_name = generate_ocaml_var name in
       let runtime_arg = sprintf "(List.nth_exn runtime_args %d)" idx in
       let is_mutated = Set.mem mutated_args name in (* Use analysis result *)
+      (* TODO: Add type change analysis *)
       let repr, setup_code =
         match arg_type, is_mutated with
         | InferredType.T_Int, false -> (R_Int, sprintf "let %s : int = %s in" ocaml_name (unbox_int runtime_arg))
@@ -450,6 +456,7 @@ and translate_lambda env arg_spec body fun_type =
       let runtime_arg_expr = sprintf "(List.nth_exn runtime_args %d)" idx in
       let condition = sprintf "(num_runtime_args > %d)" idx in
       let is_mutated = Set.mem mutated_args name in (* Use analysis result *)
+      (* TODO: Add type change analysis *)
       let repr, setup_code =
         match arg_type, is_mutated with
         | InferredType.T_Int, false -> ( R_Int, sprintf "let %s : int = (if %s then %s else %s) in" ocaml_name condition (unbox_int runtime_arg_expr) (unbox_int default_value_expr) )
@@ -471,6 +478,7 @@ and translate_lambda env arg_spec body fun_type =
       let start_idx = !arg_idx in
       let ocaml_name = generate_ocaml_var name in
       let is_mutated = Set.mem mutated_args name in (* Use analysis result *)
+      (* Rest arg is always Value.t *)
       let repr, setup_code =
           let rest_list_code = sprintf "(Value.list_to_value (List.drop runtime_args %d))" start_idx in
           if is_mutated then
