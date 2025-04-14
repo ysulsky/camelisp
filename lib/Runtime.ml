@@ -6,6 +6,8 @@ open! Core
 (* Use types/modules from the Scaml library *)
 module Value = Value
 module InferredType = InferredType (* Keep if needed elsewhere, maybe not? Check usage... Value.t compare uses it implicitly. OK. *)
+(* Need access to Compiler module's ref setter logic *)
+module Compiler = Compiler
 
 
 (* --- Error Handling Helpers --- *)
@@ -50,8 +52,9 @@ let apply_function (func : Value.t) (args : Value.t list) : Value.t =
 let is_truthy = Value.is_truthy
 
 (* --- Compile Verbose Flag --- *)
-let compile_verbose_p = ref false (* Internal OCaml flag *)
-let is_compile_verbose () = !compile_verbose_p (* Accessor for other modules *)
+(* Moved flag definition to Compiler.ml *)
+(* let compile_verbose_p = ref false *)
+(* let is_compile_verbose () = !compile_verbose_p *) (* Accessor now in Compiler.ml *)
 
 (* --- Built-in Function Implementations --- *)
 (* Adapted for mutable cons cells *)
@@ -329,9 +332,17 @@ let builtin_assoc args =
 let builtin_set_compile_verbose args =
   match args with
   | [ flag_val ] ->
-      compile_verbose_p := Value.is_truthy flag_val; (* Set the internal OCaml ref *)
+      Compiler.compile_verbose_p := Value.is_truthy flag_val; (* Set the flag in Compiler module *)
       flag_val (* Return the flag value passed *)
   | _ -> arity_error "set-compile-verbose" "expected 1 argument (t or nil)"
+
+(* --- Setter for Keep Artifacts Flag --- *)
+let builtin_set_keep_compile_artifacts args =
+  match args with
+  | [ flag_val ] ->
+      Compiler.keep_compile_artifacts_p := Value.is_truthy flag_val; (* Set the flag in Compiler module *)
+      flag_val (* Return the flag value passed *)
+  | _ -> arity_error "set-keep-compile-artifacts" "expected 1 argument (t or nil)"
 
 
 (* --- Register Built-ins --- *)
@@ -355,7 +366,8 @@ let () =
   register "compile" builtin_compile; (* Uses registered implementation *)
   register "interpret" builtin_interpret; (* Uses registered implementation *)
   (* Settings *)
-  register "set-compile-verbose" builtin_set_compile_verbose; (* Added setter *)
+  register "set-compile-verbose" builtin_set_compile_verbose;
+  register "set-keep-compile-artifacts" builtin_set_keep_compile_artifacts; (* Added *)
   (* Constants *)
   register_global "nil" Value.Nil; register_global "t" Value.T;
   ()

@@ -24,6 +24,12 @@ exception Compilation_error of string
 (* The loaded module will mutate this ref to pass back its environment. *)
 let last_loaded_environment : (string * Value.t) list option ref = ref None
 
+(* --- Compilation Flags --- *)
+let keep_compile_artifacts_p = ref false
+let keep_compile_artifacts () = !keep_compile_artifacts_p
+let compile_verbose_p = ref false
+let is_compile_verbose () = !compile_verbose_p
+
 (* Removed Callback registration mechanism *)
 (* --- End Shared State --- *)
 
@@ -50,10 +56,10 @@ let compile_and_load_string (ocaml_code : string) : (string * Value.t) list =
     (* 2. Compile the .ml to .cmx/.o (native object file) *)
     let include_flags = List.map include_paths ~f:(sprintf "-I %s") |> String.concat ~sep:" " in
     (* Use ocamlopt -c. Ensure scaml package is included for interfaces *)
+    (* Corrected: Removed the "-o %s" argument, as -c determines output names *)
     let compile_native_cmd =
-      sprintf "%s %s -package core,scaml -linkpkg -c %s -o %s" (* Output handled by -o *)
+      sprintf "%s %s -package core,scaml -linkpkg -c %s %s"
         ocamlfind_path ocamlopt_path include_flags ml_filename
-        (* Note: -o file.cmx implicitly creates file.o and file.cmi *)
     in
     (* Printf.printf "Executing: %s\n%!" compile_native_cmd; *)
     if Sys_unix.command compile_native_cmd <> 0 then
@@ -88,13 +94,17 @@ let compile_and_load_string (ocaml_code : string) : (string * Value.t) list =
          env_list (* Return the environment list directly *)
 
   ) ~finally:(fun () ->
-    (* Clean up temporary files *)
-    (* Printf.printf "Cleaning up temp files for %s\n%!" base_filename; *)
-    Exn.handle_uncaught ~exit:false (fun () -> Sys_unix.remove ml_filename);
-    Exn.handle_uncaught ~exit:false (fun () -> Sys_unix.remove cmi_filename);
-    Exn.handle_uncaught ~exit:false (fun () -> Sys_unix.remove cmx_filename);
-    Exn.handle_uncaught ~exit:false (fun () -> Sys_unix.remove o_filename);
-    Exn.handle_uncaught ~exit:false (fun () -> Sys_unix.remove cmxs_filename);
-    ()
+    (* Clean up temporary files only if keep_compile_artifacts is false *)
+    if not (keep_compile_artifacts ()) then (
+      (* Printf.printf "Cleaning up temp files for %s\n%!" base_filename; *)
+      Exn.handle_uncaught ~exit:false (fun () -> Sys_unix.remove ml_filename);
+      Exn.handle_uncaught ~exit:false (fun () -> Sys_unix.remove cmi_filename);
+      Exn.handle_uncaught ~exit:false (fun () -> Sys_unix.remove cmx_filename);
+      Exn.handle_uncaught ~exit:false (fun () -> Sys_unix.remove o_filename);
+      Exn.handle_uncaught ~exit:false (fun () -> Sys_unix.remove cmxs_filename);
+    ) else (
+      Printf.printf "Keeping artifacts for %s: %s %s %s %s %s\n%!"
+        base_filename ml_filename cmi_filename cmx_filename o_filename cmxs_filename;
+    )
   )
 

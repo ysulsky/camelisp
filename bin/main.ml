@@ -21,15 +21,14 @@ let scaml_compile_impl (code_list : Value.t list) : (string * Value.t) list =
      let typed_asts, final_env_types, needs_boxing_set = Analyze.analyze_toplevel code_list in
 
      (* 2. Translate - Pass boxing information *)
-     (* TODO: Update Translate.translate_toplevel signature to accept needs_boxing_set *)
      let ocaml_code = Translate.translate_toplevel typed_asts final_env_types needs_boxing_set in
 
      (* Check verbose flag and print generated code if enabled *)
-     if Runtime.is_compile_verbose () then (
+     if Compiler.is_compile_verbose () then (
         printf "\n--- Generated OCaml Code ---\n%s\n--------------------------\n%!" ocaml_code;
      );
 
-     (* 3. Compile and Load *)
+     (* 3. Compile and Load - Returns env list directly *)
      Compiler.compile_and_load_string ocaml_code
   with
    (* Propagate errors, potentially wrapping them *)
@@ -56,7 +55,7 @@ let language_keywords = [
   "if"; "cond"; "progn"; "let"; "let*"; "setq"; "lambda"; "defun"; (* Special forms *)
   "nil"; "t"; (* Constants *)
   "compile"; "interpret"; (* Builtins that act like special forms *)
-  "set-compile-verbose"; "exit"; (* Other utility builtins *)
+  "set-compile-verbose"; "set-keep-compile-artifacts"; "exit"; (* Other utility builtins *)
   (* Add core builtins manually if desired, though they are also in globals *)
   (* "cons"; "car"; "cdr"; "list"; "+"; "-"; "*"; "/"; "eq"; "equal"; ... *)
 ]
@@ -125,7 +124,9 @@ let run_repl () =
   printf "Welcome to Scaml REPL!\n";
   printf "Using Readline for input and completion (TAB).\n";
   printf "Use (exit) or Ctrl+D to quit.\n";
-  printf "Use (set-compile-verbose t) to see generated code during compilation.\n%!";
+  printf "Use (set-compile-verbose t) to see generated code during compilation.\n";
+  printf "Use (set-keep-compile-artifacts t) to keep temporary files.\n%!"; (* Added hint *)
+
 
   (* REPL Loop using Readline *)
   while !continue do
