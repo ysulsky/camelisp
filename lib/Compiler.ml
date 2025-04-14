@@ -11,7 +11,7 @@ module Value = Value
 let ocamlfind_path = "ocamlfind"
 (* We still need the base compiler name for ocamlfind *)
 let ocamlc_path = "ocamlc"
-(* Keep include paths for project's own modules *)
+(* Keep include paths for project's own modules (may be redundant with -package scaml, but safe) *)
 let include_paths = ["_build/default/lib/"]
 (* Library paths for linking against scaml.cma itself *)
 let library_paths = ["_build/default/lib/"]
@@ -62,9 +62,9 @@ let compile_and_load_string (ocaml_code : string) : (unit -> Value.t) * (unit ->
     (* 2. Compile the .ml to .cmo (bytecode object file) *)
     (* Use ocamlfind to invoke ocamlc with package support *)
     let include_flags = List.map include_paths ~f:(sprintf "-I %s") |> String.concat ~sep:" " in
-    (* *** MODIFIED HERE: Use ocamlfind with -package and -linkpkg *** *)
+    (* *** MODIFIED HERE: Add 'scaml' to the -package list *** *)
     let compile_byte_cmd =
-      sprintf "%s %s -package core -linkpkg -c %s -o %s %s"
+      sprintf "%s %s -package core,scaml -linkpkg -c %s -o %s %s" (* Added ,scaml *)
         ocamlfind_path ocamlc_path include_flags cmo_filename ml_filename
     in
     (* Printf.printf "Executing: %s\n%!" compile_byte_cmd; *)
@@ -72,11 +72,10 @@ let compile_and_load_string (ocaml_code : string) : (unit -> Value.t) * (unit ->
       raise (Compilation_error (sprintf "OCaml compilation failed for %s. Command: %s" ml_filename compile_byte_cmd));
 
     (* 3. Link the .cmo into a .cma (bytecode library archive) *)
-    (* Use ocamlfind for linking as well *)
+    (* Use ocamlfind for linking as well. Keep -package core here. *)
+    (* No need to add -package scaml here because we are explicitly linking *)
+    (* against scaml.cma as an input file. *)
     let lib_flags = List.map library_paths ~f:(sprintf "-I %s") |> String.concat ~sep:" " in
-    (* *** MODIFIED HERE: Use ocamlfind with -package and -linkpkg *** *)
-    (* Ensure scaml.cma is available at link time (Dune should handle this) *)
-    (* We still need to specify scaml.cma as an input file to link against *)
     let link_byte_cmd =
       sprintf "%s %s -package core -linkpkg -a %s %s -o %s %s"
         ocamlfind_path ocamlc_path lib_flags "scaml.cma" cma_filename cmo_filename
