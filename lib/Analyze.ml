@@ -11,7 +11,6 @@ module InferredType = InferredType
 (* REMOVED: module Runtime = Runtime *)
 
 (* --- Typed Abstract Syntax Tree (TAST) --- *)
-(* TAST definition remains the same *)
 module TypedAst = struct
   (* Added record to hold binding info, including mutation status *)
   type binding_info = {
@@ -279,7 +278,99 @@ let get_builtin_signature name = (* ... keep existing implementation ... *)
     | "compile" | "interpret" | "assoc" | "list" | "setcar" | "setcdr" -> Some { arg_types = None; return_type = InferredType.T_Any } (* Simplified *)
     | _ -> None
 
+(* --- Mutation Analysis Helper --- *)
+
+(** Recursively finds the set of variables from [candidates] that are assigned
+    by `setq` within the given AST node [ast]. Handles shadowing introduced
+    by `let`, `let*`, and `lambda`. *)
+let rec check_mutations (ast: TypedAst.t) (candidates: String.Set.t) : String.Set.t =
+  (* If no candidates, no mutations can be found *)
+  if Set.is_empty candidates then String.Set.empty
+  else match ast with
+    | TypedAst.Atom _ | TypedAst.Quote _ -> String.Set.empty
+    | TypedAst.Setq { pairs; _ } ->
+        let assigned_vars = List.map pairs ~f:fst |> String.Set.of_list in
+        Set.inter candidates assigned_vars
+    | TypedAst.Progn { forms; _ } ->
+        (* Union mutations found in each form *)
+        List.fold forms ~init:String.Set.empty ~f:(fun acc form ->
+          Set.union acc (check_mutations form candidates)
+        )
+    | TypedAst.If { cond; then_branch; else_branch; _ } ->
+        let cond_mut = check_mutations cond candidates in
+        let then_mut = check_mutations then_branch candidates in
+        let else_mut = Option.value_map else_branch ~default:String.Set.empty ~f:(fun e -> check_mutations e candidates) in
+        String.Set.union_list [cond_mut; then_mut; else_mut]
+    | TypedAst.Let { bindings; body; _ } ->
+        let bound_names = List.map bindings ~f:fst in
+        let bound_vars_set = String.Set.of_list bound_names in
+        (* Candidates for the body exclude newly bound vars (shadowing) *)
+        let body_candidates = Set.diff candidates bound_vars_set in
+        (* Mutations from initializers (use original candidates) *)
+        let init_mutations = List.fold bindings ~init:String.Set.empty ~f:(fun acc (_, b_info) ->
+             Set.union acc (check_mutations b_info.initializer_ast candidates)
+           )
+        in
+        (* Mutations from body (use body_candidates) *)
+        let body_mutations = List.fold body ~init:String.Set.empty ~f:(fun acc form ->
+            Set.union acc (check_mutations form body_candidates)
+          )
+        in
+        Set.union init_mutations body_mutations
+    | TypedAst.LetStar { bindings; body; _ } ->
+        (* Process sequentially, updating candidates *)
+        let final_mutations, _ = List.fold bindings ~init:(String.Set.empty, candidates)
+          ~f:(fun (acc_mutations, current_candidates) (name, b_info) ->
+            (* Check initializer mutations with current candidates *)
+            let init_mut = check_mutations b_info.initializer_ast current_candidates in
+            (* Update candidates for next step (remove newly bound var) *)
+            let next_candidates = Set.remove current_candidates name in
+            (Set.union acc_mutations init_mut, next_candidates)
+          )
+        in
+        (* Candidates for the body are the ones left after processing all bindings *)
+        let _, body_candidates = List.fold bindings ~init:([], candidates) ~f:(fun (_, current_candidates) (name, _) -> ([], Set.remove current_candidates name)) in
+        let body_mutations = List.fold body ~init:String.Set.empty ~f:(fun acc form ->
+            Set.union acc (check_mutations form body_candidates)
+          )
+        in
+        Set.union final_mutations body_mutations
+    | TypedAst.Lambda { args; body; _ } ->
+        (* Collect all argument names *)
+        let arg_names = args.required @ (List.map args.optional ~f:fst) @ (Option.to_list args.rest) in
+        let arg_vars_set = String.Set.of_list arg_names in
+        (* Candidates for the body exclude arguments *)
+        let body_candidates = Set.diff candidates arg_vars_set in
+        (* Mutations only happen within the body *)
+        List.fold body ~init:String.Set.empty ~f:(fun acc form ->
+          Set.union acc (check_mutations form body_candidates)
+        )
+    | TypedAst.Cond { clauses; _ } ->
+        List.fold clauses ~init:String.Set.empty ~f:(fun acc (test_expr, body_exprs) ->
+            let test_mut = check_mutations test_expr candidates in
+            let body_mut = List.fold body_exprs ~init:String.Set.empty ~f:(fun acc' expr ->
+                Set.union acc' (check_mutations expr candidates)
+              )
+            in
+            String.Set.union_list [acc; test_mut; body_mut]
+          )
+    | TypedAst.Funcall { func; args; _ } ->
+        let func_mut = check_mutations func candidates in
+        let args_mut = List.fold args ~init:String.Set.empty ~f:(fun acc arg ->
+            Set.union acc (check_mutations arg candidates)
+          )
+        in
+        Set.union func_mut args_mut
+    | TypedAst.Defun _ ->
+        (* Defun defines a function at top level; mutations inside it *)
+        (* don't affect outer lexical scopes being checked. *)
+        (* We could check for mutations of *global* variables here if needed, *)
+        (* but the current `check_mutations` focuses on lexical `candidates`. *)
+        String.Set.empty
+
+
 (* --- Helper to analyze progn-like body --- *)
+(* This remains largely the same, but will be called by the updated analyze_let etc. *)
 let rec analyze_progn_body env body_values
     : TypedAst.t list * substitution * InferredType.t =
   let typed_body, final_subst =
@@ -435,13 +526,20 @@ and analyze_let env bindings_val body_values : TypedAst.t * substitution =
   let final_subst = compose_subst init_subst body_subst in
   let final_result_type = apply_subst final_subst result_type in
 
-  (* TODO: Perform mutation analysis here *)
-  (* let bound_vars = List.map analyzed_bindings_tmp ~f:fst in *)
-  (* let mutated_vars = detect_mutations bound_vars typed_body in *)
+  (* Perform mutation analysis *)
+  let bound_names = List.map analyzed_bindings_tmp ~f:fst in
+  let bound_vars_set = String.Set.of_list bound_names in
+  (* Check for mutations of the bound vars within the fully analyzed body *)
+  let mutated_in_body = List.fold typed_body ~init:String.Set.empty ~f:(fun acc form ->
+      Set.union acc (check_mutations form bound_vars_set)
+    )
+  in
+
+  (* Construct final bindings with mutation info *)
   let final_bindings = List.map analyzed_bindings_tmp ~f:(fun (name, typed_init) ->
       let binding_info = {
           TypedAst.initializer_ast = typed_init;
-          is_mutated = false; (* Placeholder: Set based on analysis *)
+          is_mutated = Set.mem mutated_in_body name; (* Set based on analysis *)
       } in
       (name, binding_info)
     ) in
@@ -452,14 +550,12 @@ and analyze_let env bindings_val body_values : TypedAst.t * substitution =
 and analyze_let_star env bindings_val body_values : TypedAst.t * substitution =
    let bindings_list = match Value.value_to_list_opt bindings_val with
     | Some l -> l | None -> failwith "Let* bindings must be a proper list" in
-   (* Fold through bindings sequentially *)
-   (* TODO: This needs mutation analysis integrated sequentially *)
+   (* Fold through bindings sequentially to get typed initializers and final env *)
    let bindings_env, analyzed_bindings_tmp, bindings_subst =
      List.fold bindings_list ~init:(env, [], Subst.empty)
        ~f:(fun (current_env, acc_b, acc_s) b_val ->
          let name, init_val = match b_val with
            | Value.Symbol {name=n} -> (n, Value.Nil)
-           (* ***** FIX HERE (similar to Interpreter) ***** *)
            | Value.Cons {car=Value.Symbol {name=n}; cdr=init_list_val} ->
               (match Value.value_to_list_opt init_list_val with
                | Some [i] -> (n, i) | _ -> failwith "Malformed let* binding (init list)")
@@ -478,14 +574,27 @@ and analyze_let_star env bindings_val body_values : TypedAst.t * substitution =
    let final_subst = compose_subst bindings_subst body_subst in
    let final_result_type = apply_subst final_subst result_type in
 
-   (* TODO: Perform mutation analysis here *) (* Corrected comment *)
-   let final_bindings = List.map analyzed_bindings_tmp ~f:(fun (name, typed_init) ->
-       let binding_info = {
-           TypedAst.initializer_ast = typed_init;
-           is_mutated = false; (* Placeholder: Set based on analysis *)
-       } in
-       (name, binding_info)
-     ) in
+   (* Perform mutation analysis for let* *)
+   let final_bindings =
+     List.mapi analyzed_bindings_tmp ~f:(fun i (name_i, typed_init_i) ->
+         (* Subsequent ASTs include initializers of later bindings and the body *)
+         let subsequent_init_asts =
+           List.map (List.drop analyzed_bindings_tmp (i + 1)) ~f:snd
+         in
+         let subsequent_asts = subsequent_init_asts @ typed_body in
+         (* Check if name_i is mutated in any subsequent AST *)
+         let is_mutated =
+           List.exists subsequent_asts ~f:(fun ast ->
+             not (Set.is_empty (check_mutations ast (String.Set.singleton name_i)))
+           )
+         in
+         let binding_info = {
+             TypedAst.initializer_ast = typed_init_i;
+             is_mutated = is_mutated; (* Set based on sequential analysis *)
+         } in
+         (name_i, binding_info)
+       )
+   in
 
    (TypedAst.LetStar { bindings = final_bindings; body = typed_body; inferred_type = final_result_type }, final_subst)
 
@@ -533,6 +642,9 @@ and analyze_lambda env arg_list_val body_values : TypedAst.t * substitution =
   let fun_info = { InferredType.arg_types = Some final_arg_types; return_type = final_return_type } in
   let inferred_type = InferredType.T_Function fun_info in
   (* Pass the *parsed* arg_spec, not the value *)
+  (* Note: Mutation analysis for lambda arguments is implicitly handled by *)
+  (* check_mutations when called on the lambda body from an outer scope, *)
+  (* as it removes arg names from candidates passed down. *)
   let node = TypedAst.Lambda { args = arg_spec; body = typed_body; inferred_type } in
   (node, Subst.empty) (* Lambda subst is internal *)
 
@@ -558,6 +670,7 @@ and analyze_defun env name arg_list_val body_values : TypedAst.t * substitution 
    let final_fun_info = { InferredType.arg_types = Some final_arg_types; return_type = final_return_type } in
    let final_fun_type = InferredType.T_Function final_fun_info in
    (* Pass parsed arg_spec *)
+   (* Defun implicitly creates a mutable binding at top level *)
    let node = TypedAst.Defun { name = name; args = arg_spec; body = typed_body; fun_type = final_fun_type; inferred_type = InferredType.T_Symbol } in
    (node, Subst.empty) (* Defun subst handled in toplevel *)
 
@@ -667,6 +780,7 @@ let analyze_toplevel (values : Value.t list)
     | TypedAst.Let ({ inferred_type=t; bindings; body; _ }) ->
         (* Apply to binding_info - Explicit record construction *)
         let final_apply_binding (name, b_info) =
+            (* Apply user's requested syntax, although likely incorrect *)
             let new_init_ast = final_apply b_info.TypedAst.initializer_ast in
             (name, { TypedAst.initializer_ast = new_init_ast; is_mutated = b_info.is_mutated })
         in
@@ -674,6 +788,7 @@ let analyze_toplevel (values : Value.t list)
     | TypedAst.LetStar ({ inferred_type=t; bindings; body; _ }) ->
         (* Apply to binding_info - Explicit record construction *)
          let final_apply_binding (name, b_info) =
+             (* Apply user's requested syntax, although likely incorrect *)
              let new_init_ast = final_apply b_info.TypedAst.initializer_ast in
              (name, { TypedAst.initializer_ast = new_init_ast; is_mutated = b_info.is_mutated })
          in
