@@ -55,9 +55,17 @@ let compare_case expr =
 let () =
   let cases = [
     "(+ 1 2)";
+    "(- 10 3)";
+    "(* 2 3)";
+    "(/ 8 2)";
+    "(list 1 2 3)";
     "(car '(a b c))";
     "(cdr '(a b c))";
     "(cons 1 '(2 3))";
+    "(eq 'a 'a)";
+    "(equal '(1 2) '(1 2))";
+    "(integerp 42)";
+    "(null nil)";
   ] in
   let tests =
     List.map cases ~f:(fun ex -> ex, `Quick, fun () -> compare_case ex)

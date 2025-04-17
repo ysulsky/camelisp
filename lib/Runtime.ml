@@ -143,6 +143,8 @@ let check_arity n name args =
   if List.length args <> n then
     arity_error name (sprintf "expected %d argument(s), got %d" n (List.length args))
 
+let ret_bool = function true -> Value.T | false -> Value.Nil
+
 let predicate name n p args =
   check_arity n name args;
   if p (List.hd_exn args) then Value.T else Value.Nil
@@ -165,29 +167,32 @@ let builtin_listp args =
     | Value.Nil -> true
     | Value.Cons { cdr; _ } -> is_list cdr (* No deref *)
     | _ -> false
-  in
-  if is_list (List.hd_exn args) then Value.T else Value.Nil
-
+  in ret_bool (is_list (List.hd_exn args))
 
 let builtin_eq args =
   check_arity 2 "eq" args;
   let a = List.nth_exn args 0 in
   let b = List.nth_exn args 1 in
-  (* Physical equality for non-immediate types, value equality for immediate *)
-   match a, b with
-   | Value.Int i1, Value.Int i2 -> if i1 = i2 then Value.T else Value.Nil
-   | Value.Float f1, Value.Float f2 -> if Float.equal f1 f2 then Value.T else Value.Nil (* Use Float.equal *)
-   | Value.Char c1, Value.Char c2 -> if Char.equal c1 c2 then Value.T else Value.Nil (* Added Char *)
-   | Value.Nil, Value.Nil -> Value.T
-   | Value.T, Value.T -> Value.T
-   | _, _ -> if phys_equal a b then Value.T else Value.Nil (* Reference equality for others *)
+  match a, b with
+  (* immediates *)
+  | Value.Int i1   , Value.Int i2    -> ret_bool (i1 =  i2)
+  | Value.Float f1 , Value.Float f2  -> ret_bool (Float.equal f1 f2)
+  | Value.Char  c1 , Value.Char  c2  -> ret_bool (Char.equal  c1 c2)
+  | Value.T        , Value.T
+  | Value.Nil      , Value.Nil       -> Value.T
+  (* symbols & keywords → compare their interned names *)
+  | Value.Symbol  s1, Value.Symbol  s2 -> ret_bool (String.equal s1.name s2.name)
+  | Value.Keyword k1, Value.Keyword k2 -> ret_bool (String.equal k1      k2)
+  (* everything else → physical equality *)
+  | _ -> ret_bool (phys_equal a b)
+
 
 let builtin_equal args =
   check_arity 2 "equal" args;
   let a = List.nth_exn args 0 in
   let b = List.nth_exn args 1 in
   (* Custom compare function in Value handles mutable fields if needed *)
-  if [%compare.equal: Value.t] a b then Value.T else Value.Nil
+  ret_bool ([%compare.equal: Value.t] a b)
 
 
 (* --- Value Printing (Lisp Style) --- *)
