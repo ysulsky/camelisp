@@ -111,6 +111,8 @@ let completion_generator (text_before_cursor : string) : Readline.completion_res
 let run_repl () =
   (* Initialize the REPL's lexical environment *)
   let repl_env : Interpreter.eval_env ref = ref [] in
+  (* No need for a mutable repl_funs_env unless we add local func defs to REPL *)
+  let initial_funs_env : Interpreter.funs_env = [] in
   let continue = ref true in
 
   (* Register 'exit' *)
@@ -150,7 +152,7 @@ let run_repl () =
             let last_result = ref Value.Nil in (* Keep track of the last result *)
             begin try
               List.iter values ~f:(fun value ->
-                let result = Interpreter.eval !repl_env value in
+                let result = Interpreter.eval !repl_env initial_funs_env value in
                 last_result := result (* Update last result *)
               );
               (* Print the result of the *last* expression evaluated *)

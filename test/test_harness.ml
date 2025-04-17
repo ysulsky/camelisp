@@ -1,3 +1,4 @@
+(* test/test_harness.ml *)
 open Core
 open Core_unix
 open Stdio
@@ -5,6 +6,35 @@ open Stdio
 module Value  = Scaml.Value
 module Parse  = Scaml.Parse
 module Interp = Scaml.Interpreter
+module Runtime = Scaml.Runtime (* Added for registering compiler impl *)
+module Compiler = Scaml.Compiler (* Added for registering compiler impl *)
+module Analyze = Scaml.Analyze (* Added for compiler impl *)
+module Translate = Scaml.Translate (* Added for compiler impl *)
+
+
+(* ---------- Compiler Implementation Registration (Needed for compile tests later) --- *)
+(* Replicated from bin/main.ml for testing purposes *)
+let scaml_compile_impl (code_list : Value.t list) : (string * Value.t) list =
+  try
+    let typed_asts, final_env_types, needs_boxing_set = Analyze.analyze_toplevel code_list in
+    let ocaml_code = Translate.translate_toplevel typed_asts final_env_types needs_boxing_set in
+    Compiler.compile_and_load_string ocaml_code
+  with
+  | Compiler.Compilation_error msg -> failwith ("Compilation Error: " ^ msg)
+  | Failure msg -> failwith ("Analysis/Translation/Runtime Error: " ^ msg)
+  | exn -> failwith ("Unexpected compilation pipeline error: " ^ Exn.to_string exn)
+
+let scaml_interpret_impl (code_list : Value.t list) : Value.t =
+   try
+     Interp.eval_toplevel code_list
+   with
+   | Failure msg -> failwith ("Interpretation Error: " ^ msg)
+   | exn -> failwith ("Unexpected interpretation error: " ^ Exn.to_string exn)
+
+let () =
+ Runtime.register_compile_impl scaml_compile_impl;
+ Runtime.register_interpret_impl scaml_interpret_impl;
+ ()
 
 (* ---------- Helper to run a shell command and capture output ---------------- *)
 let run_cmd (cmd : string) : (string, string) result =
@@ -14,7 +44,7 @@ let run_cmd (cmd : string) : (string, string) result =
   let stderr = In_channel.input_all proc.stderr in
   match close_process_full proc with
   | Ok () -> Ok stdout
-  | _     -> Error stderr
+  | Error _      -> Error stderr (* Corrected: Return stderr on non-Ok status *)
 
 (* ---------- One‑shot Emacs daemon ------------------------------------------- *)
 let server_name = sprintf "scaml-test-%d" (Pid.to_int (getpid ()))
@@ -26,21 +56,26 @@ let () =
 
 (* ---------- Scaml runner (evaluate in‑process) ------------------------------ *)
 let run_scaml expr : (string, string) result =
-  match Parse.from_string expr with
+  (* Use multiple_from_string to handle potential multi-expression tests *)
+  match Parse.multiple_from_string ~filename:"<test>" expr with
   | Error msg -> Error ("parse error: " ^ msg)
-  | Ok sexp ->
+  | Ok sexps ->
       (try
-         let v = Interp.eval_toplevel [ sexp ] in
-         Ok (String.strip (!Value.to_string v))
+         let v = Interp.eval_toplevel sexps in (* Evaluate all expressions *)
+         Ok (String.strip (!Value.to_string v)) (* Return result of last expr *)
        with exn -> Error ("runtime error: " ^ Exn.to_string exn))
 
 (* ---------- Emacs runner ---------------------------------------------------- *)
 let run_emacs expr : (string, string) result =
+  (* Wrap expression in progn to handle multiple forms and print the last result *)
   let elisp = Printf.sprintf "(princ (eval (car (read-from-string %S))))" expr in
   match run_cmd (Printf.sprintf "emacsclient -n -s %s -e %S" server_name elisp) with
   | Ok out -> Ok out
-  | Error _ ->
+  | Error stderr -> (* Fallback if client fails *)
+    if String.is_prefix stderr ~prefix:"emacsclient: can't find socket" then
       run_cmd (Printf.sprintf "emacs --batch --eval %S" elisp)
+    else
+      Error stderr (* Return the original error *)
 
 (* ---------- Comparison ------------------------------------------------------ *)
 let compare_case expr =
@@ -60,8 +95,8 @@ let () =
     "(/ 1 2)";
     "(integerp (/ 8 2))";
     "(/ 8 2)";
-    "(/ 1 2)";             (* integer division edge‑case *)
-    "(+ 0.5 2)";           (* float + int mix *)
+    "(/ 1 2)";              (* integer division edge‑case *)
+    "(+ 0.5 2)";            (* float + int mix *)
     "(list 1 2 3)";
     "(car '(a b c))";
     "(cdr '(a b c))";
@@ -82,6 +117,17 @@ let () =
     "(let ((x 2) (y 3)) (+ x y))";
     "(let* ((x 2) (y (+ x 1))) y)";
     "((lambda (a b) (* a b)) 3 4)";
+    "(apply '+ '(1 2 3))"; (* Simple apply *)
+    "(apply 'list '(1 2 3 4))";
+    "(let ((a 1)) (setq a 2) a)"; (* setq modifies let var *)
+    "(let* ((a 1) (b a)) (setq a 2) b)"; (* let* binding uses old value *)
+    "(let* ((a 1) (b (progn (setq a 5) a))) b)"; (* setq affects subsequent let* binding *)
+    "((lambda (x) (setq x (* x 2)) x) 5)"; (* setq modifies lambda arg *)
+    "(let ((counter 0)) (defun inc () (setq counter (+ counter 1))) (inc) (inc) counter)"; (* defun closure modifies captured let var *)
+    "(let ((a 10)) (defun get-a () a) (setq a 20) (get-a))"; (* closure sees external update before call *)
+    "(let ((a 0)) (let ((f (lambda () (setq a (+ a 1))))) (funcall f) (funcall f) a))"; (* lambda closure modification persists *)
+    "(let ((x 1)) (let ((f (lambda (y) (setq x (+ x y))))) (apply f '(10)) (apply f '(100)) x))"; (* lambda closure modification with args persists *)
+    "(progn (setq x 1) (setq x \"hi\") x)"
   ] in
   let tests =
     List.map cases ~f:(fun ex -> ex, `Quick, fun () -> compare_case ex)

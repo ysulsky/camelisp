@@ -366,6 +366,49 @@ let builtin_assoc args =
       find_in_alist alist_val (* <<< Start search with the ALIST argument (alist_val) *)
   | _ -> arity_error "assoc" (sprintf "expected 2 arguments (key alist), got %d" (List.length args))
 
+(* --- Funcall and Apply (Lisp-2) --- *)
+
+(* Assumes args passed ARE ALREADY EVALUATED by the interpreter *)
+let builtin_funcall args =
+  match args with
+  | [] -> arity_error "funcall" "requires at least 1 argument (function)"
+  | func_val :: actual_args -> (* func_val is already evaluated Value.t *)
+      let func_to_call =
+        match func_val with
+         | (Value.Function _ | Value.Builtin _) as f -> f
+         (* In strict Elisp, funcall doesn't auto-lookup symbols. It expects a function object. *)
+         (* However, many Lisps allow symbols if their function cell holds a function. *)
+         (* Let's allow symbols here by looking up their GLOBAL value. *)
+         | Value.Symbol { name } ->
+              (match lookup_variable name with (* Check global var/fun env *)
+                | (Value.Function _ | Value.Builtin _) as f -> f
+                | _ -> type_error "funcall" (sprintf "function held by symbol '%s'" name) func_val)
+         | other -> type_error "funcall" "function or symbol" other
+      in
+      apply_function func_to_call actual_args (* Apply to already evaluated args *)
+
+let builtin_apply args =
+    match args with
+    | [func_val; args_list_val] -> (* Exactly 2 evaluated args *)
+        let func_to_call =
+             match func_val with
+             | (Value.Function _ | Value.Builtin _) as f -> f
+             (* Allow symbols similar to funcall *)
+             | Value.Symbol { name } ->
+                  (match lookup_variable name with (* Check global var/fun env *)
+                    | (Value.Function _ | Value.Builtin _) as f -> f
+                    | _ -> type_error "apply" (sprintf "function held by symbol '%s'" name) func_val)
+             | other -> type_error "apply" "function or symbol" other
+        in
+        (* The args list itself needs to be evaluated, but value_to_list_opt operates on the Value.t *)
+        let actual_args = match Value.value_to_list_opt args_list_val with
+            | Some l -> l
+            | None -> type_error "apply" "proper list for arguments" args_list_val
+        in
+        apply_function func_to_call actual_args
+    | _ -> arity_error "apply" "takes exactly 2 arguments: function and list"
+
+
 (* --- Setter for Compile Verbose Flag --- *)
 let builtin_set_compile_verbose args =
   match args with
@@ -406,6 +449,9 @@ let () =
   (* Settings *)
   register "set-compile-verbose" builtin_set_compile_verbose;
   register "set-keep-compile-artifacts" builtin_set_keep_compile_artifacts; (* Added *)
+  (* Lisp-2 Functions *)
+  register "funcall" builtin_funcall;
+  register "apply" builtin_apply;
   (* Constants *)
   register_global "nil" Value.Nil; register_global "t" Value.T;
   ()

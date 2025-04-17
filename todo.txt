@@ -1,0 +1,4 @@
+
+The environment does not represent the mutable values (e.g. running f above does not update the returned env).
+
+Additionally I'd like to separate the function definitions into a boxed interface and non-boxed. So a module that calls its own functions will just go through the unboxed interface. The repl is slightly broken (pressing enter on an incomplete sexp gives you a nil). And we need to generate tests.
