@@ -95,48 +95,81 @@ let builtin_setcdr args =
 let builtin_list args = Value.list_to_value args
 
 
-(* Simplified Arithmetic - Assume integers for now *)
-let builtin_plus args =
-  List.fold args ~init:(Value.Int 0) ~f:(fun acc v ->
-    match acc, v with
-    | Value.Int ia, Value.Int iv -> Value.Int (ia + iv)
-    (* Add float handling or type error *)
-    | _, other -> type_error "+" "integer" other (* Simplified error check *)
-  )
-let builtin_minus args =
-  match args with
-  | [] -> Value.Int 0 (* (-) -> 0 *)
-  | [Value.Int i] -> Value.Int (-i) (* (- 5) -> -5 *)
-  | Value.Int start :: rest ->
-      List.fold rest ~init:(Value.Int start) ~f:(fun acc v ->
-        match acc, v with
-        | Value.Int ia, Value.Int iv -> Value.Int (ia - iv)
-        | _, other -> type_error "-" "integer" other
-      )
-  | other :: _ -> type_error "-" "integer" other (* First arg not integer *)
+let to_float = function
+| Value.Int i -> Float.of_int i
+| Value.Float f -> f
+| not_number -> type_error "cast_to_float" "number" not_number
 
-let builtin_multiply args =
-  List.fold args ~init:(Value.Int 1) ~f:(fun acc v ->
-      match acc, v with
-      | Value.Int ia, Value.Int iv -> Value.Int (ia * iv)
-      | _, other -> type_error "*" "integer" other
-    )
+let to_int = function
+| Value.Int i -> i
+| Value.Float f -> Int.of_float f
+| not_number -> type_error "cast_to_int" "number" not_number
 
-let builtin_divide args =
-  match args with
-  | [] -> runtime_error "/" "requires at least one argument"
-  | [Value.Int i] -> (* (/ 5) -> 1/5 is 0 in integer division *)
-      if i = 0 then runtime_error "/" "division by zero"
-      else Value.Int (1 / i) (* Or maybe raise error for single arg? Emacs gives 0 *)
-  | Value.Int start :: rest ->
-      List.fold rest ~init:(Value.Int start) ~f:(fun acc v ->
-        match acc, v with
-        | Value.Int ia, Value.Int iv ->
-            if iv = 0 then runtime_error "/" "division by zero"
-            else Value.Int (ia / iv)
-        | _, other -> type_error "/" "integer" other
-      )
-  | other :: _ -> type_error "/" "integer" other
+let with_coerce ~int_fn ~float_fn args =
+  let rec any_float = function
+  | [] -> false
+  | Value.Float _ :: _ -> true
+  | _ :: tl -> any_float tl
+  in
+  if any_float args then
+    let args = List.map ~f:to_float args in
+    float_fn args
+  else
+    let args = List.map ~f:to_int args in
+    int_fn args
+
+let builtin_plus =
+  let int_fn = function
+  | [] -> Value.Int 0
+  | [i] -> Value.Int i
+  | hd :: rest -> Value.Int (List.fold rest ~init:hd ~f:(+))
+  in
+  let float_fn = function
+  | [] -> Value.Float 0.0
+  | [f] -> Value.Float f
+  | hd :: rest -> Value.Float (List.fold rest ~init:hd ~f:(+.))
+  in
+  with_coerce ~int_fn ~float_fn
+
+let builtin_multiply =
+  let int_fn = function
+  | [] -> Value.Int 1
+  | [i] -> Value.Int i
+  | hd :: rest -> Value.Int (List.fold rest ~init:hd ~f:( * ))
+  in
+  let float_fn = function
+  | [] -> Value.Float 1.0
+  | [f] -> Value.Float f
+  | hd :: rest -> Value.Float (List.fold rest ~init:hd ~f:( *. ))
+  in
+  with_coerce ~int_fn ~float_fn
+
+let builtin_minus =
+  let int_fn = function
+  | [] -> arity_error "-" "requires at least one argument"
+  | [i] -> Value.Int (-i)
+  | hd :: rest -> Value.Int (List.fold rest ~init:hd ~f:( - ))
+  in
+  let float_fn = function
+  | [] -> arity_error "-" "requires at least one argument"
+  | [f] -> Value.Float (-. f)
+  | hd :: rest -> Value.Float (List.fold rest ~init:hd ~f:( -. ))
+  in
+  with_coerce ~int_fn ~float_fn
+
+let builtin_divide =
+  let int_fn = function
+  | [] -> arity_error "/" "requires at least one argument"
+  | [0] -> runtime_error "/" "Arithmetic Error"
+  | [_] -> Value.Int 0
+  | hd :: rest -> Value.Int (List.fold rest ~init:hd ~f:( / ))
+  in
+  let float_fn = function
+  | [] -> arity_error "/" "requires at least one argument"
+  | [f] -> Value.Float (1.0 /. f)
+  | hd :: rest -> Value.Float (List.fold rest ~init:hd ~f:( /. ))
+  in
+  with_coerce ~int_fn ~float_fn
 
 
 let check_arity n name args =

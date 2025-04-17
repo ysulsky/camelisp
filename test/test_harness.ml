@@ -57,15 +57,31 @@ let () =
     "(+ 1 2)";
     "(- 10 3)";
     "(* 2 3)";
+    "(/ 1 2)";
+    "(integerp (/ 8 2))";
     "(/ 8 2)";
+    "(/ 1 2)";             (* integer division edge‑case *)
+    "(+ 0.5 2)";           (* float + int mix *)
     "(list 1 2 3)";
     "(car '(a b c))";
     "(cdr '(a b c))";
     "(cons 1 '(2 3))";
     "(eq 'a 'a)";
+    "(eq 1 1)";
     "(equal '(1 2) '(1 2))";
+    "(equal '(1 . 2) '(1 . 2))";
     "(integerp 42)";
+    "(floatp 3.14)";
+    "(stringp \"hello\")";
+    "(symbolp 'foo)";
+    "(keywordp :bar)";
+    "(vectorp [1 2 3])";
     "(null nil)";
+    "(atom 'foo)";
+    "(progn 1 2 3)";
+    "(let ((x 2) (y 3)) (+ x y))";
+    "(let* ((x 2) (y (+ x 1))) y)";
+    "((lambda (a b) (* a b)) 3 4)";
   ] in
   let tests =
     List.map cases ~f:(fun ex -> ex, `Quick, fun () -> compare_case ex)
