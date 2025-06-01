@@ -3,7 +3,7 @@
 open! Core
 (* open! Sexplib.Std - REMOVED *)
 
-(* Use types/modules from the Scaml library *)
+(* Use types/modules from the Camelisp library *)
 module Value = Value
 module InferredType = InferredType (* Keep if needed elsewhere, maybe not? Check usage... Value.t compare uses it implicitly. OK. *)
 (* Need access to Compiler module's ref setter logic *)

@@ -1,21 +1,21 @@
-(* bin/main.ml - REPL for Scaml with Readline Support *)
+(* bin/main.ml - REPL for Camelisp with Readline Support *)
 
 open! Core
 (* REMOVED: Sexplib related opens *)
 
 (* Module Aliases for convenience *)
-module Parse = Scaml.Parse (* Use the new parser module *)
-module Compiler = Scaml.Compiler
-module Runtime = Scaml.Runtime
-module Value = Scaml.Value
-module Interpreter = Scaml.Interpreter
-module Analyze = Scaml.Analyze
-module Translate = Scaml.Translate
+module Parse = Camelisp.Parse (* Use the new parser module *)
+module Compiler = Camelisp.Compiler
+module Runtime = Camelisp.Runtime
+module Value = Camelisp.Value
+module Interpreter = Camelisp.Interpreter
+module Analyze = Camelisp.Analyze
+module Translate = Camelisp.Translate
 
 
 (* --- Compile Implementation (for 'compile' built-in) --- *)
 (* This function now takes Value.t list (representing quoted code) *)
-let scaml_compile_impl (code_list : Value.t list) : (string * Value.t) list =
+let camelisp_compile_impl (code_list : Value.t list) : (string * Value.t) list =
   try
      (* 1. Analyze - Captures TASTs, final env types, and vars needing boxing *)
      let typed_asts, final_env_types, needs_boxing_set = Analyze.analyze_toplevel code_list in
@@ -38,7 +38,7 @@ let scaml_compile_impl (code_list : Value.t list) : (string * Value.t) list =
 
 (* --- Interpret Implementation (for 'interpret' built-in) --- *)
 (* This function now takes Value.t list *)
-let scaml_interpret_impl (code_list : Value.t list) : Value.t =
+let camelisp_interpret_impl (code_list : Value.t list) : Value.t =
     try
         (* Evaluate using the interpreter's top-level function *)
         Interpreter.eval_toplevel code_list
@@ -123,7 +123,7 @@ let run_repl () =
   (* Optional: Define characters that break words for completion *)
   (* Readline.set_completion_word_break_characters " \t\n\"\\'`@$><=;|&{()}"; *)
 
-  printf "Welcome to Scaml REPL!\n";
+  printf "Welcome to Camelisp REPL!\n";
   printf "Using Readline for input and completion (TAB).\n";
   printf "Use (exit) or Ctrl+D to quit.\n";
   printf "Use (set-compile-verbose t) to see generated code during compilation.\n";
@@ -163,14 +163,14 @@ let run_repl () =
             | exn -> printf "Unexpected Error: %s\n%!" (Exn.to_string exn)
             end
   done;
-  printf "Exiting Scaml REPL.\n%!"
+  printf "Exiting Camelisp REPL.\n%!"
 
 
 let () =
   (* ***** REGISTER BUILTIN IMPLEMENTATIONS ***** *)
   (* Register the adapted implementations that take Value.t list *)
-  Runtime.register_compile_impl scaml_compile_impl;
-  Runtime.register_interpret_impl scaml_interpret_impl;
+  Runtime.register_compile_impl camelisp_compile_impl;
+  Runtime.register_interpret_impl camelisp_interpret_impl;
   (* ******************************************** *)
 
   (* Run the REPL (Readline init is now inside run_repl) *)

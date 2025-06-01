@@ -1,13 +1,13 @@
 (lang dune 3.18)
 (using menhir 2.0)
-(name scaml)
+(name camelisp)
 (generate_opam_files true)
-(source (github ysulsky/scaml))
+(source (github ysulsky/camelisp))
 (authors "Yury Sulsky <yury.sulsky@gmail.com>")
 (license LICENSE)
 
 (package
- (name scaml)
+ (name camelisp)
  (synopsis "Elisp to OCaml Transpiler")
  (description "Efficiently execute elisp by transpiling to OCaml")
  (depends

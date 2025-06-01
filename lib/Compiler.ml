@@ -27,7 +27,7 @@ let unique_generated_module =
     let num_generated = ref 0 in
     fun () ->
       incr num_generated;
-      sprintf "scaml_generated_%d" !num_generated
+      sprintf "camelisp_generated_%d" !num_generated
 
 (* --- Compilation Flags --- *)
 let keep_compile_artifacts_p = ref false
@@ -62,9 +62,9 @@ let compile_and_load_string (ocaml_code : string) : (string * Value.t) list =
 
     (* 2. Compile the .ml to .cmx/.o (native object file) *)
     let include_flags = List.map include_paths ~f:(sprintf "-I %s") |> String.concat ~sep:" " in
-    (* Use ocamlopt -c. Ensure scaml package is included for interfaces. Keep -linkpkg here. *)
+    (* Use ocamlopt -c. Ensure camelisp package is included for interfaces. Keep -linkpkg here. *)
     let compile_native_cmd =
-      sprintf "%s %s -package core,scaml -linkpkg -c %s %s"
+      sprintf "%s %s -package core,camelisp -linkpkg -c %s %s"
         ocamlfind_path ocamlopt_path include_flags ml_filename
     in
     (* Print command if verbose *)
@@ -74,10 +74,10 @@ let compile_and_load_string (ocaml_code : string) : (string * Value.t) list =
 
     (* 3. Link the .cmx/.o into a .cmxs (native shared library) *)
     let lib_flags = List.map library_paths ~f:(sprintf "-I %s") |> String.concat ~sep:" " in
-    (* Use ocamlopt -shared. Link against scaml package *)
+    (* Use ocamlopt -shared. Link against camelisp package *)
     (* Corrected: Removed -linkpkg from the linking command *)
     let link_native_cmd =
-      sprintf "%s %s -package core,scaml -shared %s -o %s %s"
+      sprintf "%s %s -package core,camelisp -shared %s -o %s %s"
         ocamlfind_path ocamlopt_path lib_flags cmxs_filename cmx_filename
         (* We provide the .cmx, ocamlopt finds the corresponding .o *)
     in

@@ -1,4 +1,4 @@
-/* scaml/lib/parser.mly */
+/* camelisp/lib/parser.mly */
 %{
 open Value (* Use Value.t and helpers directly *)
 

@@ -1,4 +1,4 @@
-(* scaml/lib/parse.ml *)
+(* camelisp/lib/parse.ml *)
 open Core
 open Lexing
 (* Removed open Value *)

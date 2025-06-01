@@ -1,6 +1,6 @@
 (library
- (name scaml)
- (public_name scaml)
+ (name camelisp)
+ (public_name camelisp)
  ; Add new modules, keep existing ones in order
  (modules Value InferredType Analyze Compiler Runtime Interpreter Parse Lexer Parser Translate)
  (libraries base core core_unix.filename_unix sexplib fmt dynlink unix str menhirLib)

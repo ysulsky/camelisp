@@ -1,6 +1,6 @@
 (tests
  (names test_harness)
- (libraries scaml core alcotest core_unix)
+ (libraries camelisp core alcotest core_unix)
  (preprocess (pps ppx_let))
 )
 

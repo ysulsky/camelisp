@@ -3,18 +3,18 @@ open Core
 open Core_unix
 open Stdio
 
-module Value  = Scaml.Value
-module Parse  = Scaml.Parse
-module Interp = Scaml.Interpreter
-module Runtime = Scaml.Runtime (* Added for registering compiler impl *)
-module Compiler = Scaml.Compiler (* Added for registering compiler impl *)
-module Analyze = Scaml.Analyze (* Added for compiler impl *)
-module Translate = Scaml.Translate (* Added for compiler impl *)
+module Value  = Camelisp.Value
+module Parse  = Camelisp.Parse
+module Interp = Camelisp.Interpreter
+module Runtime = Camelisp.Runtime (* Added for registering compiler impl *)
+module Compiler = Camelisp.Compiler (* Added for registering compiler impl *)
+module Analyze = Camelisp.Analyze (* Added for compiler impl *)
+module Translate = Camelisp.Translate (* Added for compiler impl *)
 
 
 (* ---------- Compiler Implementation Registration (Needed for compile tests later) --- *)
 (* Replicated from bin/main.ml for testing purposes *)
-let scaml_compile_impl (code_list : Value.t list) : (string * Value.t) list =
+let camelisp_compile_impl (code_list : Value.t list) : (string * Value.t) list =
   try
     let typed_asts, final_env_types, needs_boxing_set = Analyze.analyze_toplevel code_list in
     let ocaml_code = Translate.translate_toplevel typed_asts final_env_types needs_boxing_set in
@@ -24,7 +24,7 @@ let scaml_compile_impl (code_list : Value.t list) : (string * Value.t) list =
   | Failure msg -> failwith ("Analysis/Translation/Runtime Error: " ^ msg)
   | exn -> failwith ("Unexpected compilation pipeline error: " ^ Exn.to_string exn)
 
-let scaml_interpret_impl (code_list : Value.t list) : Value.t =
+let camelisp_interpret_impl (code_list : Value.t list) : Value.t =
    try
      Interp.eval_toplevel code_list
    with
@@ -32,8 +32,8 @@ let scaml_interpret_impl (code_list : Value.t list) : Value.t =
    | exn -> failwith ("Unexpected interpretation error: " ^ Exn.to_string exn)
 
 let () =
- Runtime.register_compile_impl scaml_compile_impl;
- Runtime.register_interpret_impl scaml_interpret_impl;
+ Runtime.register_compile_impl camelisp_compile_impl;
+ Runtime.register_interpret_impl camelisp_interpret_impl;
  ()
 
 (* ---------- Helper to run a shell command and capture output ---------------- *)
@@ -47,15 +47,15 @@ let run_cmd (cmd : string) : (string, string) result =
   | Error _      -> Error stderr (* Corrected: Return stderr on non-Ok status *)
 
 (* ---------- One‑shot Emacs daemon ------------------------------------------- *)
-let server_name = sprintf "scaml-test-%d" (Pid.to_int (getpid ()))
+let server_name = sprintf "camelisp-test-%d" (Pid.to_int (getpid ()))
 
 let () =
   ignore (run_cmd (sprintf "emacs --daemon=%s" server_name));
   at_exit (fun () ->
     ignore (run_cmd (sprintf "emacsclient -n -s %s --eval '(kill-emacs)'" server_name)))
 
-(* ---------- Scaml runner (evaluate in‑process) ------------------------------ *)
-let run_scaml expr : (string, string) result =
+(* ---------- Camelisp runner (evaluate in‑process) ------------------------------ *)
+let run_camelisp expr : (string, string) result =
   (* Use multiple_from_string to handle potential multi-expression tests *)
   match Parse.multiple_from_string ~filename:"<test>" expr with
   | Error msg -> Error ("parse error: " ^ msg)
@@ -79,11 +79,11 @@ let run_emacs expr : (string, string) result =
 
 (* ---------- Comparison ------------------------------------------------------ *)
 let compare_case expr =
-  match run_scaml expr, run_emacs expr with
+  match run_camelisp expr, run_emacs expr with
   | Ok mine, Ok theirs when String.equal mine theirs -> ()
   | Ok mine, Ok theirs ->
-      failwithf "%s mismatch:\n  scaml → %S\n  emacs → %S" expr mine theirs ()
-  | Error e, _ -> failwithf "scaml error on %S: %s" expr e ()
+      failwithf "%s mismatch:\n  camelisp → %S\n  emacs → %S" expr mine theirs ()
+  | Error e, _ -> failwithf "camelisp error on %S: %s" expr e ()
   | _, Error e -> failwithf "emacs error on %S: %s" expr e ()
 
 (* ---------- Alcotest boilerplate ------------------------------------------- *)
@@ -132,4 +132,4 @@ let () =
   let tests =
     List.map cases ~f:(fun ex -> ex, `Quick, fun () -> compare_case ex)
   in
-  Alcotest.run "scaml vs emacs" [ "golden", tests ]
+  Alcotest.run "camelisp vs emacs" [ "golden", tests ]

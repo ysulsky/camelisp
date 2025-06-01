@@ -1,4 +1,4 @@
-(* scaml/lib/lexer.mll *)
+(* camelisp/lib/lexer.mll *)
 {
 open Parser (* Needed to access the token type defined in parser.mly *)
 (* Use Value directly *)

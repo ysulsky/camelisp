@@ -5,7 +5,7 @@
 open! Core
 (* REMOVED: open! Sexplib.Std *)
 
-(* Use types/modules from the Scaml library *)
+(* Use types/modules from the Camelisp library *)
 module Value = Value
 module InferredType = InferredType
 (* REMOVED: module Runtime = Runtime *)
