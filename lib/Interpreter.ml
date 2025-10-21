@@ -319,6 +319,13 @@ and eval_cond (env : eval_env) (fenv : funs_env) (clauses : Value.t list) : Valu
 
 
 (* --- Top-Level Evaluation --- *)
+
+(* Evaluation that returns both the result and the final environment *)
+let eval_with_env (env : eval_env) (fenv : funs_env) (values : Value.t list) : Value.t * eval_env =
+  let result = eval_progn env fenv values in
+  (result, env) (* Return both the value and the environment *)
+
+(* Original interface for backward compatibility *)
 let eval_toplevel (values : Value.t list) : Value.t =
   (* Start with empty local environments *)
   let initial_env : eval_env = [] in

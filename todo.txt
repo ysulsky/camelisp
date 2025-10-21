@@ -1,4 +1,10 @@
+✓ DONE: The environment mutation issue (fixed in commit 7128aa2 - top-level setq vars are now mutable)
 
-The environment does not represent the mutable values (e.g. running f above does not update the returned env).
+TODO:
+1. Separate function definitions into boxed and non-boxed interfaces
+   - Modules calling their own functions should use unboxed interface for better performance
 
-Additionally I'd like to separate the function definitions into a boxed interface and non-boxed. So a module that calls its own functions will just go through the unboxed interface. The repl is slightly broken (pressing enter on an incomplete sexp gives you a nil). And we need to generate tests.
+2. Fix REPL incomplete S-expression handling
+   - Pressing enter on an incomplete sexp incorrectly returns nil instead of continuing input
+
+3. Generate more comprehensive tests
