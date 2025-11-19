@@ -29,7 +29,14 @@ let camelisp_compile_impl (code_list : Value.t list) : (string * Value.t) list =
      );
 
      (* 3. Compile and Load - Returns env list directly *)
-     Compiler.compile_and_load_string ocaml_code
+     let env_alist = Compiler.compile_and_load_string ocaml_code in
+
+     (* Register the compiled definitions in the Runtime global environment *)
+     List.iter env_alist ~f:(fun (name, value) ->
+         Runtime.register_global name value
+     );
+
+     env_alist
   with
    (* Propagate errors, potentially wrapping them *)
    | Compiler.Compilation_error msg -> failwith ("Compilation Error: " ^ msg)
@@ -107,7 +114,6 @@ let completion_generator (text_before_cursor : string) : Readline.completion_res
 
 
 (* --- REPL Implementation with Readline --- *)
-
 let run_repl () =
   (* Initialize the REPL's lexical environment *)
   let repl_env : Interpreter.eval_env ref = ref [] in
@@ -129,39 +135,97 @@ let run_repl () =
   printf "Use (set-compile-verbose t) to see generated code during compilation.\n";
   printf "Use (set-keep-compile-artifacts t) to keep temporary files.\n%!"; (* Added hint *)
 
+  (* Helper to check if input has balanced delimiters *)
+  let has_balanced_delimiters s =
+    let rec check chars paren_count bracket_count in_string in_char in_comment =
+      match chars with
+      | [] -> paren_count = 0 && bracket_count = 0 && not in_string && not in_char
+      | ';' :: rest when not in_string && not in_char ->
+          (* Skip line comment *)
+            let rest' = List.drop_while rest ~f:(fun c -> not (Char.equal c '\n')) in
+          check rest' paren_count bracket_count in_string in_char in_comment
+      | '\\' :: _ :: rest when in_string || in_char ->
+          (* Skip escaped character *)
+          check rest paren_count bracket_count in_string in_char in_comment
+      | '"' :: rest when not in_char && not in_comment ->
+          check rest paren_count bracket_count (not in_string) in_char in_comment
+      | '?' :: '\\' :: _ :: rest when not in_string && not in_comment ->
+          (* Character literal with escape *)
+          check rest paren_count bracket_count in_string false in_comment
+      | '?' :: _ :: rest when not in_string && not in_comment ->
+          (* Character literal *)
+          check rest paren_count bracket_count in_string false in_comment
+      | '(' :: rest when not in_string && not in_char && not in_comment ->
+          check rest (paren_count + 1) bracket_count in_string in_char in_comment
+      | ')' :: rest when not in_string && not in_char && not in_comment ->
+          if paren_count <= 0 then false
+          else check rest (paren_count - 1) bracket_count in_string in_char in_comment
+      | '[' :: rest when not in_string && not in_char && not in_comment ->
+          check rest paren_count (bracket_count + 1) in_string in_char in_comment
+      | ']' :: rest when not in_string && not in_char && not in_comment ->
+          if bracket_count <= 0 then false
+          else check rest paren_count (bracket_count - 1) in_string in_char in_comment
+      | _ :: rest ->
+          check rest paren_count bracket_count in_string in_char in_comment
+    in
+    check (String.to_list s) 0 0 false false false
+  in
+
+  (* Buffer for accumulating multi-line input *)
+  let input_buffer = Buffer.create 256 in
+  let prompt_ref = ref "> " in
 
   (* REPL Loop using Readline *)
   while !continue do
     (* Pass the completion function to readline *)
-    match Readline.readline ~prompt:"> " ~completion_fun:completion_generator () with
+    match Readline.readline ~prompt:!prompt_ref ~completion_fun:completion_generator () with
     | None -> (* EOF (Ctrl+D) *)
         continue := false;
         printf "\n%!" (* Print newline after Ctrl+D *)
     | Some line ->
-        (* Add non-empty lines to history *)
-        if not (String.is_empty (String.strip line)) then
-          Readline.add_history line;
+        (* Add line to buffer *)
+        Buffer.add_string input_buffer line;
+        Buffer.add_char input_buffer '\n';
 
-        (* Parse potentially multiple expressions from the line *)
-        match Parse.multiple_from_string ~filename:"<stdin>" line with
-        | Error msg ->
-            (* Handle parsing error *)
-            printf "Parse Error: %s\n%!" msg
-        | Ok values ->
-            (* Evaluate each parsed value sequentially *)
-            let last_result = ref Value.Nil in (* Keep track of the last result *)
-            begin try
-              List.iter values ~f:(fun value ->
+        let accumulated = Buffer.contents input_buffer in
+        let trimmed = String.strip accumulated in
+
+        (* If empty or just whitespace, reset and continue *)
+        if String.is_empty trimmed then begin
+          Buffer.clear input_buffer;
+          prompt_ref := "> ";
+          () (* Continue loop *)
+        end else if not (has_balanced_delimiters accumulated) then begin
+          (* Unbalanced - need more input *)
+          prompt_ref := "... ";
+          () (* Continue loop to read more *)
+        end else begin
+          (* Delimiters are balanced - try to parse *)
+          match Parse.from_string ~filename:"<stdin>" accumulated with
+          | Error msg ->
+              (* Parse error even with balanced delimiters *)
+              printf "Parse Error: %s\n%!" msg;
+              Buffer.clear input_buffer;
+              prompt_ref := "> "
+          | Ok value ->
+              (* Successfully parsed - add to history, evaluate, and reset *)
+              if not (String.is_empty trimmed) then
+                Readline.add_history trimmed;
+
+              Buffer.clear input_buffer;
+              prompt_ref := "> ";
+
+              (* Evaluate the parsed expression *)
+              begin try
                 let result = Interpreter.eval !repl_env initial_funs_env value in
-                last_result := result (* Update last result *)
-              );
-              (* Print the result of the *last* expression evaluated *)
-              printf "%s\n%!" (!Value.to_string !last_result);
-            with
-            (* Handle runtime errors during evaluation *)
-            | Failure msg -> printf "Runtime Error: %s\n%!" msg
-            | exn -> printf "Unexpected Error: %s\n%!" (Exn.to_string exn)
-            end
+                (* Print the result *)
+                printf "%s\n%!" (!Value.to_string result);
+              with
+              (* Handle runtime errors during evaluation *)
+              | Failure msg -> printf "Runtime Error: %s\n%!" msg
+              | exn -> printf "Unexpected Error: %s\n%!" (Exn.to_string exn)
+              end
+        end
   done;
   printf "Exiting Camelisp REPL.\n%!"
 

@@ -47,6 +47,8 @@ type env_entry = {
   repr : var_repr; (* Base representation if not boxed *)
   is_mutated : bool; (* From mutation analysis *)
   needs_boxing : bool; (* From type change analysis *)
+  internal_name : string option; (* Name of unboxed internal function, if any *)
+  arg_types : InferredType.t list option; (* Argument types for unboxed call, if any *)
 }
 
 type translation_env = env_entry String.Map.t
@@ -68,9 +70,9 @@ let generate_ocaml_var prefix =
 
 let lookup_var_info env elisp_name = Map.find env elisp_name
 
-(* Modified: add_binding now includes is_mutated and needs_boxing *)
-let add_binding env elisp_name ocaml_name repr is_mutated needs_boxing =
-  Map.set env ~key:elisp_name ~data:{ ocaml_name; repr; is_mutated; needs_boxing }
+(* Modified: add_binding now includes is_mutated, needs_boxing, internal_name, arg_types *)
+let add_binding env elisp_name ocaml_name repr is_mutated needs_boxing ?internal_name ?arg_types () =
+  Map.set env ~key:elisp_name ~data:{ ocaml_name; repr; is_mutated; needs_boxing; internal_name; arg_types }
 
 (* Modified: add_bindings expects entries with new fields *)
 let add_bindings env bindings =
@@ -169,7 +171,7 @@ and translate_node env needs_boxing_set texpr : string * var_repr =
           | Value.Symbol { name } -> (
               match lookup_var_info env name with
               (* Local variables: access depends on mutation and boxing status *)
-              | Some { ocaml_name; repr; is_mutated; needs_boxing } ->
+              | Some { ocaml_name; repr; is_mutated; needs_boxing; _ } ->
                   let use_ref = is_mutated || needs_boxing in
                   let access_code = if use_ref then sprintf "!%s" ocaml_name else ocaml_name in
                   (* The representation of the *value obtained* depends on boxing *)
@@ -298,7 +300,7 @@ and translate_let env needs_boxing_set bindings body inferred_type : string * va
             | R_Value -> to_value env needs_boxing_set typed_init
         in
 
-        inner_env_ref := add_binding !inner_env_ref elisp_name ocaml_name base_repr is_mutated needs_boxing;
+        inner_env_ref := add_binding !inner_env_ref elisp_name ocaml_name base_repr is_mutated needs_boxing ();
 
         let ocaml_type_annot, binding_keyword =
            match final_repr, use_ref with
@@ -337,7 +339,7 @@ and translate_let_star env needs_boxing_set bindings body inferred_type : string
             | R_Value -> to_value current_env needs_boxing_set typed_init
         in
 
-        let next_env = add_binding current_env elisp_name ocaml_name base_repr is_mutated needs_boxing in
+        let next_env = add_binding current_env elisp_name ocaml_name base_repr is_mutated needs_boxing () in
 
         let ocaml_type_annot, binding_keyword =
            match final_repr, use_ref with
@@ -363,7 +365,7 @@ and translate_setq env needs_boxing_set pairs inferred_type : string * var_repr 
         (* Use explicit binding for lookup result to potentially help typechecker *)
         let entry_opt = lookup_var_info env sym_name in
         match entry_opt with
-        | Some { ocaml_name; repr; is_mutated; needs_boxing } ->
+        | Some { ocaml_name; repr; is_mutated; needs_boxing; _ } ->
             if not is_mutated then
               (* Error: Assignment to non-mutable local variable *)
               failwithf "Translate Error: Attempt to setq non-mutable local variable '%s'" sym_name ()
@@ -396,10 +398,12 @@ and translate_setq env needs_boxing_set pairs inferred_type : string * var_repr 
   (final_code, target_repr)
 
 (* Modified: Pass needs_boxing_set down, use it for lambda arg bindings *)
-and translate_lambda env needs_boxing_set arg_spec body fun_type =
+(* Modified: Pass needs_boxing_set down, use it for lambda arg bindings *)
+(* Modified: Pass needs_boxing_set down, use it for lambda arg bindings *)
+and translate_lambda_impl env needs_boxing_set arg_spec fun_type mutated_args body_generator =
   (* Qualify all T_* constructors *)
   let open InferredType in
-  let inferred_arg_types_list, inferred_return_type =
+  let inferred_arg_types_list, _ =
     match fun_type with
     | T_Function { arg_types = Some types; return_type } -> (types, return_type)
     | T_Function { arg_types = None; return_type } ->
@@ -420,7 +424,6 @@ and translate_lambda env needs_boxing_set arg_spec body fun_type =
   let min_args = List.length arg_spec.required in
   let max_args_opt = if Option.is_some arg_spec.rest then None else Some (min_args + List.length arg_spec.optional) in
   Buffer.add_string code (sprintf "    let num_runtime_args = List.length runtime_args in\n");
-  (* Corrected: Generate the complete format string for the error message first *)
   let expected_args_fmt_str =
     sprintf "Expected %d%s args, got %%d" min_args
       (match max_args_opt with
@@ -429,25 +432,22 @@ and translate_lambda env needs_boxing_set arg_spec body fun_type =
       | Some m -> sprintf "-%d" m)
   in
   Buffer.add_string code
-    (sprintf (* Corrected: Call Printf.sprintf inside to format the message before passing to arity_error *)
+    (sprintf
        "    if num_runtime_args < %d %s then Runtime.arity_error \"lambda\" (Printf.sprintf %S num_runtime_args);\n"
        min_args
        (match max_args_opt with
        | None -> ""
-       | Some m -> sprintf "|| num_runtime_args > %d" m) (* This part generates the condition correctly *)
-       expected_args_fmt_str); (* Pass the format string here *)
+       | Some m -> sprintf "|| num_runtime_args > %d" m)
+       expected_args_fmt_str);
 
   (* Argument Binding & Environment Setup *)
   let inner_env_ref = ref env in
   let arg_bindings_code = Buffer.create 128 in
   let arg_idx = ref 0 in
 
-  (* Perform mutation analysis on lambda body w.r.t args *)
-  let lambda_body_ast = TypedAst.Progn { forms = body; inferred_type = inferred_return_type } in
+  (* Determine which args need boxing (check top-level set passed down) *)
   let arg_names = arg_spec.required @ (List.map ~f:fst arg_spec.optional) @ (Option.to_list arg_spec.rest) in
   let arg_names_set = String.Set.of_list arg_names in
-  let mutated_args = Analyze.check_mutations lambda_body_ast arg_names_set in
-  (* Determine which args need boxing (check top-level set passed down) *)
   let args_needing_boxing = Set.inter needs_boxing_set arg_names_set in
 
   (* Required Args *)
@@ -474,7 +474,7 @@ and translate_lambda env needs_boxing_set arg_spec body fun_type =
         | R_Value, true -> sprintf "let %s : Value.t ref = ref %s in" ocaml_name runtime_arg
       in
       Buffer.add_string arg_bindings_code (sprintf "    %s\n" setup_code);
-      inner_env_ref := add_binding !inner_env_ref name ocaml_name base_repr is_mutated needs_boxing;
+      inner_env_ref := add_binding !inner_env_ref name ocaml_name base_repr is_mutated needs_boxing ();
       incr arg_idx);
   (* Optional Args *)
   List.iter arg_spec.optional ~f:(fun (name, default_val_opt) ->
@@ -502,7 +502,7 @@ and translate_lambda env needs_boxing_set arg_spec body fun_type =
          | R_Value, true -> sprintf "let %s : Value.t ref = ref (if %s then %s else %s) in" ocaml_name condition runtime_arg_expr default_value_expr
       in
       Buffer.add_string arg_bindings_code (sprintf "    %s\n" setup_code);
-      inner_env_ref := add_binding !inner_env_ref name ocaml_name base_repr is_mutated needs_boxing;
+      inner_env_ref := add_binding !inner_env_ref name ocaml_name base_repr is_mutated needs_boxing ();
       incr arg_idx);
   (* Rest Arg *)
   (match arg_spec.rest with
@@ -511,7 +511,7 @@ and translate_lambda env needs_boxing_set arg_spec body fun_type =
       let start_idx = !arg_idx in
       let ocaml_name = generate_ocaml_var name in
       let is_mutated = Set.mem mutated_args name in
-      let needs_boxing = Set.mem args_needing_boxing name in (* Rest arg is always Value.t *)
+      let needs_boxing = Set.mem args_needing_boxing name in
       let _repr, setup_code =
           let rest_list_code = sprintf "(Value.list_to_value (List.drop runtime_args %d))" start_idx in
           if is_mutated || needs_boxing then (* Boxed ref *)
@@ -520,15 +520,94 @@ and translate_lambda env needs_boxing_set arg_spec body fun_type =
               (R_Value, sprintf "let %s : Value.t = %s in" ocaml_name rest_list_code)
       in
       Buffer.add_string arg_bindings_code (sprintf "    %s\n" setup_code);
-      inner_env_ref := add_binding !inner_env_ref name ocaml_name R_Value is_mutated needs_boxing); (* Base repr is R_Value *)
+      inner_env_ref := add_binding !inner_env_ref name ocaml_name R_Value is_mutated needs_boxing ());
 
-  Buffer.add_buffer code arg_bindings_code; (* Add bindings setup *)
-  (* Corrected: Translate body and box result if necessary *)
-  let body_code_raw, body_repr = translate_progn_sequence !inner_env_ref needs_boxing_set body inferred_return_type in
-  let final_body_code = box_value body_code_raw body_repr in (* Box if needed *)
-  Buffer.add_string code (sprintf "    %s\n))" final_body_code); (* Add potentially boxed body code *)
+  Buffer.add_buffer code arg_bindings_code;
+
+  (* Generate Body using callback *)
+  let body_code_raw, body_repr = body_generator !inner_env_ref in
+  let final_body_code = box_value body_code_raw body_repr in
+  Buffer.add_string code (sprintf "    %s\n))" final_body_code);
   Buffer.contents code
 
+and translate_lambda env needs_boxing_set arg_spec body fun_type =
+  let open InferredType in
+  let inferred_return_type = match fun_type with T_Function { return_type; _ } -> return_type | _ -> T_Any in
+  let lambda_body_ast = TypedAst.Progn { forms = body; inferred_type = inferred_return_type } in
+  let arg_names = arg_spec.required @ (List.map ~f:fst arg_spec.optional) @ (Option.to_list arg_spec.rest) in
+  let arg_names_set = String.Set.of_list arg_names in
+  let mutated_args = Analyze.check_mutations lambda_body_ast arg_names_set in
+
+  translate_lambda_impl env needs_boxing_set arg_spec fun_type mutated_args (fun env ->
+      translate_progn_sequence env needs_boxing_set body inferred_return_type
+  )
+
+and translate_defun_internal env needs_boxing_set arg_spec body fun_type =
+  let open InferredType in
+  let inferred_arg_types_list, inferred_return_type =
+    match fun_type with
+    | T_Function { arg_types = Some types; return_type } -> (types, return_type)
+    | _ -> failwith "Internal error: Defun must have function type"
+  in
+  let inferred_arg_types = Array.of_list inferred_arg_types_list in
+
+  (* Analyze mutations in body *)
+  let lambda_body_ast = TypedAst.Progn { forms = body; inferred_type = inferred_return_type } in
+  let arg_names = arg_spec.required @ (List.map ~f:fst arg_spec.optional) @ (Option.to_list arg_spec.rest) in
+  let arg_names_set = String.Set.of_list arg_names in
+  let mutated_args = Analyze.check_mutations lambda_body_ast arg_names_set in
+  let args_needing_boxing = Set.inter needs_boxing_set arg_names_set in
+
+  let inner_env_ref = ref env in
+  let arg_idx = ref 0 in
+  let ocaml_arg_names = ref [] in
+  let ocaml_arg_types = ref [] in
+
+  (* Generate argument names and bindings for internal function *)
+  (* Internal function only supports required args for now? *)
+  (* Or we can support optional args if we pass them as options? *)
+  (* For unboxed optimization, let's stick to required args for now. *)
+  (* If there are optional/rest args, we might need a more complex internal signature or just fallback to boxed. *)
+  (* But wait, the plan was to support unboxed calls. *)
+  (* If we have optional args, the internal function signature is tricky. *)
+  (* Let's assume for now we only optimize if all args are required. *)
+
+  (* Actually, let's just generate the internal function with ALL args (required + optional + rest) as arguments. *)
+  (* Optional args can be passed as options? Or just values (caller handles default)? *)
+  (* Caller handling default is better for unboxed calls. *)
+
+  (* Let's simplify: Only generate internal function for REQUIRED args only. *)
+  (* If there are optional/rest args, we skip internal generation (return None). *)
+
+  if not (List.is_empty arg_spec.optional) || Option.is_some arg_spec.rest then
+     None
+  else
+     let bindings_code = Buffer.create 128 in
+     List.iter arg_spec.required ~f:(fun name ->
+         let idx = !arg_idx in
+         let arg_type = inferred_arg_types.(idx) in
+         let ocaml_name = generate_ocaml_var name in
+         ocaml_arg_names := !ocaml_arg_names @ [ocaml_name];
+         ocaml_arg_types := !ocaml_arg_types @ [arg_type];
+
+         let is_mutated = Set.mem mutated_args name in
+         let needs_boxing = Set.mem args_needing_boxing name in
+         let base_repr = match arg_type with | T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool | _ -> R_Value in
+         let _final_repr = if needs_boxing then R_Value else base_repr in
+         let use_ref = is_mutated || needs_boxing in
+
+         (* If use_ref, we need to create the ref from the argument *)
+         (* The argument passed to internal function is unboxed (final_repr). *)
+         if use_ref then
+            Buffer.add_string bindings_code (sprintf "  let %s = ref %s in\n" ocaml_name ocaml_name);
+
+         inner_env_ref := add_binding !inner_env_ref name ocaml_name base_repr is_mutated needs_boxing ();
+         incr arg_idx
+     );
+
+     let body_code_raw, _ = translate_progn_sequence !inner_env_ref needs_boxing_set body inferred_return_type in
+     let full_body_code = (Buffer.contents bindings_code) ^ body_code_raw in
+     Some (full_body_code, !ocaml_arg_names, !ocaml_arg_types)
 
 and translate_cond env needs_boxing_set clauses inferred_type : string * var_repr =
    (* Qualify all T_* constructors *)
@@ -588,20 +667,83 @@ and translate_funcall env needs_boxing_set func args inferred_type : string * va
   match optimized_result with
   | Some code -> (code, target_repr) (* Return optimized code and the target repr *)
   | None ->
-      (* --- Generic Function Call --- *)
-      let func_code = to_value env needs_boxing_set func in
-      let arg_codes_value = List.map args ~f:(to_value env needs_boxing_set) in
-      (* Generate the Runtime call (always returns Value.t) *)
-      let call_code = sprintf "(Runtime.apply_function (%s) [%s])" func_code (String.concat ~sep:"; " arg_codes_value) in
-      (* Convert result to target representation *)
-      let final_code =
-          match target_repr with
-          | R_Int -> unbox_int call_code
-          | R_Float -> unbox_float call_code
-          | R_Bool -> unbox_bool call_code
-          | R_Value -> call_code
+      (* --- Check for Internal Unboxed Function --- *)
+      let internal_call_opt =
+        match func with
+        | TypedAst.Atom { value = Value.Symbol { name }; _ } -> (
+            match lookup_var_info env name with
+            | Some { internal_name = Some internal_fn; arg_types = Some arg_types_list; _ } ->
+                (* Check arity *)
+                if List.length args <> List.length arg_types_list then
+                   None (* Arity mismatch - fallback to runtime check or error? Runtime will handle it *)
+                else
+                   (* Generate unboxed arguments *)
+                   let arg_codes = List.map2_exn args arg_types_list ~f:(fun arg arg_type ->
+                       match arg_type with
+                       | InferredType.T_Int -> to_int env needs_boxing_set arg
+                       | InferredType.T_Float -> to_float env needs_boxing_set arg
+                       | InferredType.T_Bool | InferredType.T_Nil -> to_bool env needs_boxing_set arg
+                       | _ -> to_value env needs_boxing_set arg
+                   ) in
+                   Some (sprintf "(%s %s)" internal_fn (String.concat ~sep:" " arg_codes))
+            | _ -> None
+          )
+        | _ -> None
       in
-      (final_code, target_repr)
+
+      match internal_call_opt with
+      | Some code ->
+          (* Convert result to target representation *)
+          (* We need to know the return type of the internal function to know its repr *)
+          (* For now, assume internal functions return the repr matching their inferred type *)
+          (* But we don't have the return type here easily available unless we store it in env *)
+          (* Let's assume we store return_type in env or infer it from the call's inferred_type *)
+          (* The call's inferred_type tells us what the result is expected to be *)
+
+          (* Actually, the internal function returns a specific OCaml type. *)
+          (* We need to know what that is to convert it to target_repr. *)
+          (* If inferred_type is T_Int, internal fn returns int. *)
+          (* So we can deduce the source repr from inferred_type. *)
+          let source_repr = match inferred_type with
+            | InferredType.T_Int -> R_Int
+            | InferredType.T_Float -> R_Float
+            | InferredType.T_Bool | InferredType.T_Nil -> R_Bool
+            | _ -> R_Value
+          in
+
+          let final_code =
+            match (source_repr, target_repr) with
+            | R_Int, R_Value -> box_int code
+            | R_Float, R_Value -> box_float code
+            | R_Bool, R_Value -> box_bool code
+            | R_Value, R_Int -> unbox_int code
+            | R_Value, R_Float -> unbox_float code
+            | R_Value, R_Bool -> unbox_bool code
+            | R_Int, R_Float -> sprintf "(Float.of_int %s)" code
+            | R_Float, R_Int -> sprintf "(Int.of_float %s)" code
+            | R_Bool, R_Int -> sprintf "(if %s then 1 else 0)" code
+            | R_Bool, R_Float -> sprintf "(if %s then 1.0 else 0.0)" code
+            | R_Int, R_Bool -> sprintf "(%s <> 0)" code
+            | R_Float, R_Bool -> sprintf "(%s <> 0.0)" code
+            | _, _ -> code
+          in
+          (final_code, target_repr)
+
+      | None ->
+          (* --- Generic Function Call --- *)
+          let func_code = to_value env needs_boxing_set func in
+          let arg_codes_value = List.map args ~f:(to_value env needs_boxing_set) in
+          (* Generate the Runtime call (always returns Value.t) *)
+          let call_code = sprintf "(Runtime.apply_function (%s) [%s])" func_code (String.concat ~sep:"; " arg_codes_value) in
+          (* Convert result to target representation *)
+          let final_code =
+              match target_repr with
+              | R_Int -> unbox_int call_code
+              | R_Float -> unbox_float call_code
+              | R_Bool -> unbox_bool call_code
+              | R_Value -> call_code
+          in
+          (final_code, target_repr)
 
 
 (* --- Top Level Translation --- *)
@@ -616,14 +758,25 @@ let translate_toplevel texprs final_env_types needs_boxing_set =
   (* Pass 1: Collect all top-level definitions (defun, first setq) and populate top_level_var_map *)
   List.iter texprs ~f:(fun texpr ->
       match texpr with
-      | TypedAst.Defun { name; _ } ->
-          if not (Map.mem !top_level_var_map name) then
-            let initial_type_opt = Map.find initial_types_map name in
-            let base_repr = match initial_type_opt with Some(InferredType.T_Int) -> R_Int | Some(InferredType.T_Float) -> R_Float | Some(InferredType.T_Bool | InferredType.T_Nil) -> R_Bool | _ -> R_Value in
-            let is_mutated = true in (* Defun is always mutable *)
-            let needs_boxing = Set.mem needs_boxing_set name in
-            let ocaml_name = generate_ocaml_var name in
-            top_level_var_map := Map.set !top_level_var_map ~key:name ~data:{ ocaml_name; repr = base_repr; is_mutated; needs_boxing };
+       | TypedAst.Defun { name; args; fun_type; _ } ->
+           if not (Map.mem !top_level_var_map name) then
+             let initial_type_opt = Map.find initial_types_map name in
+             let base_repr = match initial_type_opt with Some(InferredType.T_Int) -> R_Int | Some(InferredType.T_Float) -> R_Float | Some(InferredType.T_Bool | InferredType.T_Nil) -> R_Bool | _ -> R_Value in
+             let is_mutated = true in (* Defun is always mutable *)
+             let needs_boxing = Set.mem needs_boxing_set name in
+             let ocaml_name = generate_ocaml_var name in
+
+             (* Check eligibility for internal function *)
+             let internal_name, arg_types =
+                if List.is_empty args.optional && Option.is_none args.rest then
+                   match fun_type with
+                   | InferredType.T_Function { arg_types = Some types; _ } ->
+                       (Some (name ^ "_internal"), Some types)
+                   | _ -> (None, None)
+                else (None, None)
+             in
+
+             top_level_var_map := Map.set !top_level_var_map ~key:name ~data:{ ocaml_name; repr = base_repr; is_mutated; needs_boxing; internal_name; arg_types };
       | TypedAst.Setq { pairs; _ } ->
           List.iter pairs ~f:(fun (sym_name, typed_value) ->
               if not (Map.mem !top_level_var_map sym_name) then
@@ -632,7 +785,7 @@ let translate_toplevel texprs final_env_types needs_boxing_set =
                 let is_mutated = true in (* Assume top-level setq vars are mutable *)
                 let needs_boxing = Set.mem needs_boxing_set sym_name in
                 let ocaml_name = generate_ocaml_var sym_name in
-                top_level_var_map := Map.set !top_level_var_map ~key:sym_name ~data:{ ocaml_name; repr = value_base_repr; is_mutated; needs_boxing };
+                top_level_var_map := Map.set !top_level_var_map ~key:sym_name ~data:{ ocaml_name; repr = value_base_repr; is_mutated; needs_boxing; internal_name = None; arg_types = None };
             )
       | _ -> ()
     );
@@ -662,16 +815,59 @@ let translate_toplevel texprs final_env_types needs_boxing_set =
           if not (Set.mem !defined_in_pass1_5 name) then (
               match Map.find final_top_level_env name with
               | None -> () (* Should not happen if Pass 1 was correct *)
-              | Some { ocaml_name; repr=base_repr; is_mutated; needs_boxing } -> (* Use base_repr from map *)
+              | Some { ocaml_name; repr=base_repr; is_mutated; needs_boxing; _ } -> (* Use base_repr from map *)
                   let first_def_expr = Map.find_exn !first_def_map name in
                   (* Only generate definition if current expr is the first defining one *)
                   if phys_equal defining_expr first_def_expr then (
                       defined_in_pass1_5 := Set.add !defined_in_pass1_5 name; (* Mark as defined *)
                       let initial_value_code, initial_value_repr =
                           match defining_expr with
-                          | TypedAst.Defun { args; body; fun_type; _ } ->
-                              let lambda_code = translate_lambda final_top_level_env needs_boxing_set args body fun_type in
-                              (lambda_code, R_Value) (* Defun always results in Value.t *)
+                          | TypedAst.Defun { name; args; body; fun_type; _ } ->
+                              (* Check if we decided to generate an internal function *)
+                              let internal_fn_opt =
+                                match Map.find final_top_level_env name with
+                                | Some { internal_name = Some iname; arg_types = Some atypes; _ } -> Some (iname, atypes)
+                                | _ -> None
+                              in
+
+                              (match internal_fn_opt with
+                              | Some (internal_name, arg_types) ->
+                                  (* 1. Generate Internal Function *)
+                                  let internal_body_opt = translate_defun_internal final_top_level_env needs_boxing_set args body fun_type in
+                                  (match internal_body_opt with
+                                   | Some (internal_body, arg_names, _) ->
+                                       let type_to_ocaml_type = function
+                                         | InferredType.T_Int -> "int"
+                                         | InferredType.T_Float -> "float"
+                                         | InferredType.T_Bool | InferredType.T_Nil -> "bool"
+                                         | _ -> "Value.t"
+                                       in
+                                       let typed_args = List.map2_exn arg_names arg_types ~f:(fun n t -> sprintf "(%s : %s)" n (type_to_ocaml_type t)) in
+                                       let internal_def = sprintf "let rec %s %s =\n%s\n in\n" internal_name (String.concat ~sep:" " typed_args) internal_body in
+                                       Buffer.add_string definitions_buffer internal_def;
+
+                                       (* 2. Generate Wrapper *)
+                                       let wrapper_code = translate_lambda_impl final_top_level_env needs_boxing_set args fun_type String.Set.empty (fun inner_env ->
+                                           let call_args = List.map args.required ~f:(fun arg_name ->
+                                               match Map.find inner_env arg_name with
+                                               | Some { ocaml_name; _ } -> ocaml_name
+                                               | None -> failwithf "Internal error: Wrapper argument '%s' not found in environment" arg_name ()
+                                           ) in
+                                           let call_code = sprintf "(%s %s)" internal_name (String.concat ~sep:" " call_args) in
+                                           let return_type = match fun_type with T_Function { return_type; _ } -> return_type | _ -> T_Any in
+                                           let return_repr = match return_type with T_Int -> R_Int | T_Float -> R_Float | T_Bool | T_Nil -> R_Bool | _ -> R_Value in
+                                           (call_code, return_repr)
+                                       ) in
+                                       (wrapper_code, R_Value)
+                                   | None ->
+                                       (* Fallback if generation failed for some reason *)
+                                       let lambda_code = translate_lambda final_top_level_env needs_boxing_set args body fun_type in
+                                       (lambda_code, R_Value)
+                                  )
+                              | None ->
+                                  let lambda_code = translate_lambda final_top_level_env needs_boxing_set args body fun_type in
+                                  (lambda_code, R_Value)
+                              )
                           | TypedAst.Setq { pairs; _ } ->
                               let _, typed_value = List.find_exn pairs ~f:(fun (n,_) -> String.equal n name) in
                               let code, repr = translate_node final_top_level_env needs_boxing_set typed_value in
@@ -718,7 +914,7 @@ let translate_toplevel texprs final_env_types needs_boxing_set =
       | TypedAst.Setq { pairs; inferred_type=_ } ->
           List.iter pairs ~f:(fun (sym_name, typed_value) ->
               match Map.find final_top_level_env sym_name with
-              | Some { ocaml_name; is_mutated; needs_boxing; repr=base_repr } ->
+              | Some { ocaml_name; is_mutated; needs_boxing; repr=base_repr; _ } ->
                   (* Check if this is the *first* setq for this var *)
                   let defining_expr = Map.find_exn !first_def_map sym_name in
                   if phys_equal expr defining_expr then
